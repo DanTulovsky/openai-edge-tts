@@ -7,9 +7,9 @@ vars:
   # Docker image repository (override with: IMAGE=yourname/yourrepo task ...)
   IMAGE:
     sh: 'echo ${IMAGE:-mrwetsnow/openai-edge-tts}'
-  # Date-based tag used when no tag is provided
+  # Date-time tag (UTC) used when no tag is provided, supports multiple pushes per day
   DATE_TAG:
-    sh: 'date +%Y-%m-%d'
+    sh: 'date -u +%Y-%m-%d-%H%M%S'
   # All tags to apply: use TAGS (space/comma-separated) or TAG if provided; otherwise fallback to DATE_TAG. Always include 'latest'.
   ALL_TAGS:
     sh: |
