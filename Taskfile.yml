@@ -7,9 +7,24 @@ vars:
   # Docker image repository (override with: IMAGE=yourname/yourrepo task ...)
   IMAGE:
     sh: 'echo ${IMAGE:-mrwetsnow/openai-edge-tts}'
-  # Image tag (override with: TAG=v1 task ...)
-  TAG:
-    sh: 'echo ${TAG:-latest}'
+  # Date-based tag used when no tag is provided
+  DATE_TAG:
+    sh: 'date +%Y-%m-%d'
+  # All tags to apply: use TAGS (space/comma-separated) or TAG if provided; otherwise fallback to DATE_TAG. Always include 'latest'.
+  ALL_TAGS:
+    sh: |
+      set -e
+      # Prefer TAGS, then TAG; support comma or space separated values
+      if [ -n "${TAGS:-}" ]; then
+        INPUT_TAGS="${TAGS}"
+      elif [ -n "${TAG:-}" ]; then
+        INPUT_TAGS="${TAG}"
+      else
+        INPUT_TAGS="{{.DATE_TAG}}"
+      fi
+      # Normalize commas to spaces
+      INPUT_TAGS=$(echo "$INPUT_TAGS" | tr ',' ' ')
+      echo "$INPUT_TAGS latest"
   # Whether to include ffmpeg in the image build
   INSTALL_FFMPEG:
     sh: 'echo ${INSTALL_FFMPEG:-false}'
@@ -20,8 +35,17 @@ tasks:
     env:
       DOCKER_BUILDKIT: '1'
     cmds:
-      - docker build --pull --no-cache -t {{.IMAGE}}:{{.TAG}} --build-arg INSTALL_FFMPEG={{.INSTALL_FFMPEG}} .
-      - docker push {{.IMAGE}}:{{.TAG}}
+      - |
+        bash -ce '
+        tags="{{.ALL_TAGS}}"
+        tag_args=""
+        for t in $tags; do
+          tag_args="$tag_args -t {{.IMAGE}}:$t"
+        done
+        docker build --pull --no-cache $tag_args --build-arg INSTALL_FFMPEG={{.INSTALL_FFMPEG}} .
+        for t in $tags; do
+          docker push {{.IMAGE}}:$t
+        done'
     silent: false
 
 
