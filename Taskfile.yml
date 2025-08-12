@@ -1,0 +1,27 @@
+version: '3'
+
+# Task runner configuration for building and pushing Docker images
+# Requires: https://taskfile.dev
+
+vars:
+  # Docker image repository (override with: IMAGE=yourname/yourrepo task ...)
+  IMAGE:
+    sh: 'echo ${IMAGE:-mrwetsnow/openai-edge-tts}'
+  # Image tag (override with: TAG=v1 task ...)
+  TAG:
+    sh: 'echo ${TAG:-latest}'
+  # Whether to include ffmpeg in the image build
+  INSTALL_FFMPEG:
+    sh: 'echo ${INSTALL_FFMPEG:-false}'
+
+tasks:
+  build-push:
+    desc: Build Docker image and push to Docker Hub
+    env:
+      DOCKER_BUILDKIT: '1'
+    cmds:
+      - docker build --pull --no-cache -t {{.IMAGE}}:{{.TAG}} --build-arg INSTALL_FFMPEG={{.INSTALL_FFMPEG}} .
+      - docker push {{.IMAGE}}:{{.TAG}}
+    silent: false
+
+
