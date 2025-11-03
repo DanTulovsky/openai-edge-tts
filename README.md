@@ -142,6 +142,51 @@ docker run -d -p 5050:5050 --env-file .env openai-edge-tts
 <details>
 <summary>
 
+## Building Multi-Platform Images (ARM64 & AMD64)
+
+</summary>
+
+To build Docker images for both ARM64 and AMD64 architectures:
+
+**Using the build script:**
+
+```bash
+# Build and push multi-platform to registry
+./build-multi-platform.sh --push
+
+# Build with FFmpeg support and push
+./build-multi-platform.sh --ffmpeg --push
+
+# Build for local use (current platform only)
+./build-multi-platform.sh
+
+# See all options
+./build-multi-platform.sh --help
+```
+
+**Note:** Multi-platform builds require pushing to a registry. Local builds without `--push` will only build for your current platform.
+
+**Using Docker Buildx directly:**
+
+```bash
+# Create builder if needed
+docker buildx create --name multiarch-builder --driver docker-container --use --bootstrap
+
+# Build and push multi-platform image
+docker buildx build --platform linux/amd64,linux/arm64 \
+  --build-arg INSTALL_FFMPEG=true \
+  -t yourusername/openai-edge-tts:latest \
+  --push .
+
+# Verify platforms
+docker buildx imagetools inspect yourusername/openai-edge-tts:latest
+```
+
+</details>
+
+<details>
+<summary>
+
 ## Running with Python
 
 </summary>
@@ -234,7 +279,7 @@ Generates audio from the input text. Available parameters:
 - **voice** (string): One of the OpenAI-compatible voices (alloy, echo, fable, onyx, nova, shimmer) or any valid `edge-tts` voice (default: `"en-US-AvaNeural"`).
 - **response_format** (string): Audio format. Options: `mp3`, `opus`, `aac`, `flac`, `wav`, `pcm` (default: `mp3`).
 - **speed** (number): Playback speed (0.25 to 4.0). Default is `1.0`.
-- **stream_format** (string): Response format. Options: `"audio"` (raw audio data, default) or `"sse"` (Server-Sent Events streaming with JSON events).
+- **stream_format** (string): Response format. Options: `"audio"` (raw audio data, default), `"audio_stream"` (streaming raw audio with chunked transfer), or `"sse"` (Server-Sent Events streaming with JSON events).
 
 **Note:** The API is fully compatible with OpenAI's TTS API specification. The `instructions` parameter (for fine-tuning voice characteristics) is not currently supported, but all other parameters work identically to OpenAI's implementation.
 
@@ -297,6 +342,28 @@ curl -X POST http://localhost:5050/v1/audio/speech \
   --output speech.mp3
 ```
 
+#### Raw Audio Streaming (Low-Latency Playback)
+
+For low-latency browser playback with immediate streaming, use `audio_stream` format:
+
+```bash
+curl -X POST http://localhost:5050/v1/audio/speech \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer your_api_key_here" \
+  -d '{
+    "input": "This will stream raw audio chunks for immediate playback!",
+    "voice": "alloy",
+    "stream_format": "audio_stream"
+  }' | ffplay -i -
+```
+
+**Benefits of audio_stream:**
+- Lowest latency for browser playback
+- Starts playing within 1-2 seconds
+- Uses HTTP chunked transfer encoding
+- Raw audio bytes (no base64 encoding overhead)
+- Best for real-time applications
+
 #### Server-Sent Events (SSE) Streaming
 
 For applications that need structured streaming events (like web applications), use SSE format:
@@ -324,6 +391,43 @@ data: {"type": "speech.audio.done", "usage": {"input_tokens": 12, "output_tokens
 ```
 
 #### JavaScript/Web Usage
+
+Example using fetch API for raw audio streaming (lowest latency):
+
+```javascript
+async function streamTTSWithAudioStream(text) {
+  const response = await fetch('http://localhost:5050/v1/audio/speech', {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      Authorization: 'Bearer your_api_key_here',
+    },
+    body: JSON.stringify({
+      input: text,
+      voice: 'alloy',
+      stream_format: 'audio_stream',
+    }),
+  });
+
+  const reader = response.body.getReader();
+  const chunks = [];
+
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    chunks.push(value);
+  }
+
+  // Combine and play
+  const audioBlob = new Blob(chunks, { type: 'audio/mpeg' });
+  const audioUrl = URL.createObjectURL(audioBlob);
+  const audio = new Audio(audioUrl);
+  audio.play();
+}
+
+// Usage
+streamTTSWithAudioStream('Hello from raw audio streaming!');
+```
 
 Example using fetch API for SSE streaming:
 
@@ -409,78 +513,6 @@ curl -X POST http://localhost:5050/v1/audio/speech \
     "voice": "ja-JP-KeitaNeural"
   }' \
   --output speech.mp3
-```
-
-#### JavaScript/Web Usage
-
-Example using fetch API for SSE streaming:
-
-```javascript
-async function streamTTSWithSSE(text) {
-  const response = await fetch('http://localhost:5050/v1/audio/speech', {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      Authorization: 'Bearer your_api_key_here',
-    },
-    body: JSON.stringify({
-      input: text,
-      voice: 'alloy',
-      stream_format: 'sse',
-    }),
-  });
-
-  const reader = response.body.getReader();
-  const decoder = new TextDecoder();
-  const audioChunks = [];
-
-  while (true) {
-    const { done, value } = await reader.read();
-    if (done) break;
-
-    const chunk = decoder.decode(value);
-    const lines = chunk.split('\n');
-
-    for (const line of lines) {
-      if (line.startsWith('data: ')) {
-        const data = JSON.parse(line.slice(6));
-
-        if (data.type === 'speech.audio.delta') {
-          // Decode base64 audio chunk
-          const audioData = atob(data.audio);
-          const audioArray = new Uint8Array(audioData.length);
-          for (let i = 0; i < audioData.length; i++) {
-            audioArray[i] = audioData.charCodeAt(i);
-          }
-          audioChunks.push(audioArray);
-        } else if (data.type === 'speech.audio.done') {
-          console.log('Speech synthesis complete:', data.usage);
-
-          // Combine all chunks and play
-          const totalLength = audioChunks.reduce(
-            (sum, chunk) => sum + chunk.length,
-            0
-          );
-          const combinedArray = new Uint8Array(totalLength);
-          let offset = 0;
-          for (const chunk of audioChunks) {
-            combinedArray.set(chunk, offset);
-            offset += chunk.length;
-          }
-
-          const audioBlob = new Blob([combinedArray], { type: 'audio/mpeg' });
-          const audioUrl = URL.createObjectURL(audioBlob);
-          const audio = new Audio(audioUrl);
-          audio.play();
-          return;
-        }
-      }
-    }
-  }
-}
-
-// Usage
-streamTTSWithSSE('Hello from SSE streaming!');
 ```
 
 #### Additional Endpoints

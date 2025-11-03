@@ -29,6 +29,8 @@ EXPAND_API = getenv_bool('EXPAND_API', DEFAULT_CONFIGS["EXPAND_API"])
 # DEFAULT_MODEL = os.getenv('DEFAULT_MODEL', 'tts-1')
 
 # Currently in "beta" — needs more extensive testing where drop-in replacement warranted
+
+
 def generate_sse_audio_stream(text, voice, speed):
     """Generator function for SSE streaming with JSON events."""
     try:
@@ -36,16 +38,16 @@ def generate_sse_audio_stream(text, voice, speed):
         for chunk in generate_speech_stream(text, voice, speed):
             # Base64 encode the audio chunk
             encoded_audio = base64.b64encode(chunk).decode('utf-8')
-            
+
             # Create SSE event for audio delta
             event_data = {
                 "type": "speech.audio.delta",
                 "audio": encoded_audio
             }
-            
+
             # Format as SSE event
             yield f"data: {json.dumps(event_data)}\n\n"
-        
+
         # Send completion event
         completion_event = {
             "type": "speech.audio.done",
@@ -56,7 +58,7 @@ def generate_sse_audio_stream(text, voice, speed):
             }
         }
         yield f"data: {json.dumps(completion_event)}\n\n"
-        
+
     except Exception as e:
         print(f"Error during SSE streaming: {e}")
         # Send error event
@@ -66,7 +68,22 @@ def generate_sse_audio_stream(text, voice, speed):
         }
         yield f"data: {json.dumps(error_event)}\n\n"
 
+# Raw audio streaming for low-latency playback
+
+
+def generate_raw_audio_stream(text, voice, speed):
+    """Generator function for raw audio streaming (following SSE pattern)."""
+    try:
+        # Use existing streaming infrastructure
+        for chunk in generate_speech_stream(text, voice, speed):
+            yield chunk  # Yield raw audio bytes directly
+    except Exception as e:
+        print(f"Error during raw audio streaming: {e}")
+        return
+
 # OpenAI endpoint format
+
+
 @app.route('/v1/audio/speech', methods=['POST'])
 @app.route('/audio/speech', methods=['POST'])  # Add this line for the alias
 @require_api_key
@@ -85,18 +102,18 @@ def text_to_speech():
         voice = data.get('voice', DEFAULT_VOICE)
         response_format = data.get('response_format', DEFAULT_RESPONSE_FORMAT)
         speed = float(data.get('speed', DEFAULT_SPEED))
-        
-        # Check stream format - only "sse" triggers streaming
-        stream_format = data.get('stream_format', 'audio')  # 'audio' (default) or 'sse'
-        
+
+        # Check stream format - "sse" or "audio_stream" trigger streaming
+        stream_format = data.get('stream_format', 'audio')  # 'audio' (default), 'sse', or 'audio_stream'
+
         mime_type = AUDIO_FORMAT_MIME_TYPES.get(response_format, "audio/mpeg")
-        
+
         if stream_format == 'sse':
             # Return SSE streaming response with JSON events
             def generate_sse():
                 for event in generate_sse_audio_stream(text, voice, speed):
                     yield event
-            
+
             return Response(
                 generate_sse(),
                 mimetype='text/event-stream',
@@ -107,20 +124,36 @@ def text_to_speech():
                     'X-Accel-Buffering': 'no'  # Disable nginx buffering
                 }
             )
+        elif stream_format == 'audio_stream':
+            # Return raw audio streaming (follows SSE pattern)
+            def generate():
+                for chunk in generate_raw_audio_stream(text, voice, speed):
+                    yield chunk
+
+            return Response(
+                generate(),
+                mimetype=mime_type,
+                headers={
+                    'Content-Type': mime_type,
+                    'Cache-Control': 'no-cache',
+                    'Connection': 'keep-alive',
+                    'X-Accel-Buffering': 'no'
+                }
+            )
         else:
             # Return raw audio data (like OpenAI) - can be piped to ffplay
             output_file_path = generate_speech(text, voice, response_format, speed)
-            
+
             # Read the file and return raw audio data
             with open(output_file_path, 'rb') as audio_file:
                 audio_data = audio_file.read()
-            
+
             # Clean up the temporary file
             try:
                 os.unlink(output_file_path)
             except OSError:
                 pass  # File might already be cleaned up
-            
+
             return Response(
                 audio_data,
                 mimetype=mime_type,
@@ -129,7 +162,7 @@ def text_to_speech():
                     'Content-Length': str(len(audio_data))
                 }
             )
-            
+
     except Exception as e:
         if DETAILED_ERROR_LOGGING:
             app.logger.error(f"Error in text_to_speech: {str(e)}\n{traceback.format_exc()}")
@@ -139,6 +172,8 @@ def text_to_speech():
         return jsonify({"error": "An internal server error occurred", "details": str(e)}), 500
 
 # OpenAI endpoint format
+
+
 @app.route('/v1/models', methods=['GET', 'POST'])
 @app.route('/models', methods=['GET', 'POST'])
 @app.route('/v1/audio/models', methods=['GET', 'POST'])
@@ -147,10 +182,13 @@ def list_models():
     return jsonify({"models": get_models_formatted()})
 
 # OpenAI endpoint format
+
+
 @app.route('/v1/audio/voices', methods=['GET', 'POST'])
 @app.route('/audio/voices', methods=['GET', 'POST'])
 def list_voices_formatted():
     return jsonify({"voices": get_voices_formatted()})
+
 
 @app.route('/v1/voices', methods=['GET', 'POST'])
 @app.route('/voices', methods=['GET', 'POST'])
@@ -164,11 +202,13 @@ def list_voices():
 
     return jsonify({"voices": get_voices(specific_language)})
 
+
 @app.route('/v1/voices/all', methods=['GET', 'POST'])
 @app.route('/voices/all', methods=['GET', 'POST'])
 @require_api_key
 def list_all_voices():
     return jsonify({"voices": get_voices('all')})
+
 
 """
 Support for ElevenLabs and Azure AI Speech
@@ -177,12 +217,14 @@ Support for ElevenLabs and Azure AI Speech
 
 # http://localhost:5050/elevenlabs/v1/text-to-speech
 # http://localhost:5050/elevenlabs/v1/text-to-speech/en-US-AndrewNeural
+
+
 @app.route('/elevenlabs/v1/text-to-speech/<voice_id>', methods=['POST'])
 @require_api_key
 def elevenlabs_tts(voice_id):
     if not EXPAND_API:
         return jsonify({"error": f"Endpoint not allowed"}), 500
-    
+
     # Parse the incoming JSON payload
     try:
         payload = request.json
@@ -214,12 +256,14 @@ def elevenlabs_tts(voice_id):
 # tts.speech.microsoft.com/cognitiveservices/v1
 # https://{region}.tts.speech.microsoft.com/cognitiveservices/v1
 # http://localhost:5050/azure/cognitiveservices/v1
+
+
 @app.route('/azure/cognitiveservices/v1', methods=['POST'])
 @require_api_key
 def azure_tts():
     if not EXPAND_API:
         return jsonify({"error": f"Endpoint not allowed"}), 500
-    
+
     # Parse the SSML payload
     try:
         ssml_data = request.data.decode('utf-8')
@@ -249,6 +293,7 @@ def azure_tts():
 
     # Return the generated audio file
     return send_file(output_file_path, mimetype="audio/mpeg", as_attachment=True, download_name="speech.mp3")
+
 
 print(f" Edge TTS (Free Azure TTS) Replacement for OpenAI's TTS API")
 print(f" ")
