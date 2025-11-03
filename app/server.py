@@ -172,15 +172,29 @@ def stream_speech(stream_id):
         _active_streams.pop(stream_id, None)
         return jsonify({'error': 'Stream expired'}), 410
 
+    # Special-case iOS Safari metadata probe (Icy-Metadata header).
+    # Safari issues a separate GET with `Icy-Metadata: 1` to probe the stream.
+    # Respond with 200 and an ICY header without consuming/deleting the stream.
+    if request.headers.get('Icy-Metadata') is not None:
+        return Response(
+            '',
+            status=200,
+            headers={
+                'Content-Type': 'audio/mpeg',
+                'Cache-Control': 'no-cache',
+                'Accept-Ranges': 'bytes',
+                'Icy-MetaInt': '0',
+                'Access-Control-Allow-Origin': request.headers.get('Origin', '*')
+            }
+        )
+
     def generate_and_cleanup():
-        try:
-            for chunk in generate_raw_audio_stream(params['input'], params['voice'], params['speed']):
-                yield chunk
-        finally:
-            try:
-                _active_streams.pop(stream_id, None)
-            except Exception:
-                pass
+        # Stream audio to the client. Do NOT remove the _active_streams entry here:
+        # keeping the stream entry until its expiry allows clients (e.g. iOS Safari)
+        # to make additional probing requests (like Icy-Metadata) against the
+        # same stream_id/token while the entry is still valid.
+        for chunk in generate_raw_audio_stream(params['input'], params['voice'], params['speed']):
+            yield chunk
 
     return Response(
         generate_and_cleanup(),
