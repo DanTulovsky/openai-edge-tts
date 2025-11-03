@@ -148,8 +148,16 @@ echo ""
 if ! docker buildx version > /dev/null 2>&1; then
     echo -e "${YELLOW}Warning: Docker buildx not found. Install it for multi-platform builds.${NC}"
     echo "Attempting to build for current platform only..."
+    # Pass version as build arg
+    VERSION_ARG=""
+    if [ -n "$VERSION_TAG" ]; then
+        VERSION_ARG="--build-arg VERSION=${VERSION_TAG}"
+    else
+        VERSION_ARG="--build-arg VERSION=${TAG:-dev}"
+    fi
     docker build -t "${IMAGE_NAME}:${TAG}" \
                  --build-arg INSTALL_FFMPEG=${INSTALL_FFMPEG} \
+                 ${VERSION_ARG} \
                  .
     exit 0
 fi
@@ -167,6 +175,12 @@ fi
 # Build args
 BUILD_ARGS="--platform linux/amd64,linux/arm64"
 BUILD_ARGS="${BUILD_ARGS} --build-arg INSTALL_FFMPEG=${INSTALL_FFMPEG}"
+# Pass version as build arg (use VERSION_TAG if available, otherwise use TAG or 'dev')
+if [ -n "$VERSION_TAG" ]; then
+    BUILD_ARGS="${BUILD_ARGS} --build-arg VERSION=${VERSION_TAG}"
+else
+    BUILD_ARGS="${BUILD_ARGS} --build-arg VERSION=${TAG:-dev}"
+fi
 BUILD_ARGS="${BUILD_ARGS} ${TAGS_TO_BUILD}"
 
 # Add tag suffix for FFmpeg builds
@@ -199,8 +213,17 @@ if [ "$PUSH" = false ]; then
         TAG_CMDS="${TAG_CMDS} -t ${IMAGE_NAME}:${VERSION_TAG}"
     fi
 
+    # Pass version as build arg
+    VERSION_ARG=""
+    if [ -n "$VERSION_TAG" ]; then
+        VERSION_ARG="--build-arg VERSION=${VERSION_TAG}"
+    else
+        VERSION_ARG="--build-arg VERSION=${TAG:-dev}"
+    fi
+
     ${BUILD_CMD} ${TAG_CMDS} \
                  --build-arg INSTALL_FFMPEG=${INSTALL_FFMPEG} \
+                 ${VERSION_ARG} \
                  .
 
     if [ "$INSTALL_FFMPEG" = true ]; then

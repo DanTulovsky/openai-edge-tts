@@ -20,6 +20,8 @@ This project provides a local, OpenAI-compatible text-to-speech (TTS) API using 
 
 - **OpenAI-Compatible Endpoint**: `/v1/audio/speech` with similar request structure and behavior.
 - **SSE Streaming Support**: Real-time audio streaming via Server-Sent Events when `stream_format: "sse"` is specified.
+- **HLS Streaming Support**: HTTP Live Streaming for iOS Safari compatibility when `stream_format: "hls"` is specified (requires FFmpeg).
+- **Raw Audio Streaming**: Low-latency progressive playback with `stream_format: "audio_stream"`.
 - **Supported Voices**: Maps OpenAI voices (alloy, echo, fable, onyx, nova, shimmer) to `edge-tts` equivalents.
 - **Flexible Formats**: Supports multiple audio formats (mp3, opus, aac, flac, wav, pcm).
 - **Adjustable Speed**: Option to modify playback speed (0.25x to 4.0x).
@@ -279,7 +281,8 @@ Generates audio from the input text. Available parameters:
 - **voice** (string): One of the OpenAI-compatible voices (alloy, echo, fable, onyx, nova, shimmer) or any valid `edge-tts` voice (default: `"en-US-AvaNeural"`).
 - **response_format** (string): Audio format. Options: `mp3`, `opus`, `aac`, `flac`, `wav`, `pcm` (default: `mp3`).
 - **speed** (number): Playback speed (0.25 to 4.0). Default is `1.0`.
-- **stream_format** (string): Response format. Options: `"audio"` (raw audio data, default), `"audio_stream"` (streaming raw audio with chunked transfer), or `"sse"` (Server-Sent Events streaming with JSON events).
+- **stream_format** (string): Response format. Options: `"audio"` (raw audio data, default), `"audio_stream"` (streaming raw audio with chunked transfer), `"sse"` (Server-Sent Events streaming with JSON events), or `"hls"` (HTTP Live Streaming for iOS Safari compatibility).
+- **hls_segment_duration** (number, optional): When using `stream_format="hls"`, specify segment duration in seconds (default: 5.0, can be set lower for lower latency).
 
 **Note:** The API is fully compatible with OpenAI's TTS API specification. The `instructions` parameter (for fine-tuning voice characteristics) is not currently supported, but all other parameters work identically to OpenAI's implementation.
 
@@ -389,6 +392,101 @@ data: {"type": "speech.audio.delta", "audio": "base64-encoded-audio-chunk"}
 
 data: {"type": "speech.audio.done", "usage": {"input_tokens": 12, "output_tokens": 0, "total_tokens": 12}}
 ```
+
+#### HTTP Live Streaming (HLS) for iOS Safari
+
+HLS provides native progressive audio playback on iOS Safari and other HLS-compatible browsers. This format segments the audio stream into small chunks and serves them via an `.m3u8` playlist.
+
+**Note:** HLS requires FFmpeg to be installed. If FFmpeg is not available, HLS requests will return an error.
+
+**Example Request:**
+
+```bash
+curl -X POST http://localhost:5050/v1/audio/speech \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer your_api_key_here" \
+  -d '{
+    "input": "This will generate HLS segments for progressive playback on iOS Safari.",
+    "voice": "alloy",
+    "stream_format": "hls",
+    "hls_segment_duration": 5.0
+  }'
+```
+
+**Response:**
+```json
+{
+  "playlist_url": "/v1/audio/speech/hls/{session_id}/playlist.m3u8"
+}
+```
+
+**Benefits of HLS:**
+- ✅ Native support on iOS Safari (no MediaSource API needed)
+- ✅ True progressive playback - starts playing before entire stream completes
+- ✅ Automatic buffering handled by the browser
+- ✅ Works with pause/resume functionality
+- ✅ Low latency start - first segment available quickly
+
+**JavaScript Example for iOS Safari:**
+
+```javascript
+async function streamTTSWithHLS(text) {
+  // Detect iOS Safari or HLS-compatible browser
+  const isIOS = /iPad|iPhone|iPod/.test(navigator.userAgent);
+  const isSafari = /^((?!chrome|android).)*safari/i.test(navigator.userAgent);
+  const useHLS = isIOS || (isSafari && typeof MediaSource === 'undefined');
+
+  if (useHLS) {
+    // Use HLS for iOS Safari
+    const response = await fetch('http://localhost:5050/v1/audio/speech', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': 'Bearer your_api_key_here',
+      },
+      body: JSON.stringify({
+        input: text,
+        voice: 'alloy',
+        stream_format: 'hls',
+        hls_segment_duration: 5.0,
+      }),
+    });
+
+    const { playlist_url } = await response.json();
+    const fullPlaylistUrl = `http://localhost:5050${playlist_url}`;
+
+    // iOS Safari natively supports HLS - just set the src!
+    const audio = new Audio(fullPlaylistUrl);
+    await audio.play();
+  } else {
+    // Use MediaSource API for other browsers (existing code)
+    // ... your existing audio_stream or SSE code
+  }
+}
+
+// Usage
+streamTTSWithHLS('Hello from HLS streaming on iOS Safari!');
+```
+
+**Important Client-Side Notes:**
+- ✅ **DO**: Use `<audio src="full_playlist_url">` directly on iOS Safari
+- ✅ **DO**: Construct absolute URL: `https://your-server.com${playlist_url}`
+- ❌ **DON'T**: Use MediaSource API with HLS (MediaSource doesn't support HLS)
+- ❌ **DON'T**: Try to fetch and process HLS chunks manually
+- ❌ **DON'T**: Use relative URLs - always use full absolute URLs
+
+**Troubleshooting "NotSupportedError":**
+This error typically occurs when:
+1. **Using MediaSource API**: HLS must be used with native `<audio>` element, not MediaSource
+2. **Incorrect URL**: Make sure you're using an absolute URL (with protocol and domain)
+3. **Mobile App Framework**: React Native and other mobile frameworks may not support native HLS - you may need:
+   - React Native: Use `react-native-video` or `expo-av` with HLS support
+   - Flutter: Use `video_player` package with HLS support
+   - WebView: Ensure WebView supports HLS playback
+
+**Configuration:**
+- `HLS_SEGMENT_DURATION`: Environment variable to set default segment duration (default: 5.0 seconds)
+- `HLS_CLEANUP_TIMEOUT`: Time in seconds before old HLS sessions are cleaned up (default: 300 seconds)
 
 #### JavaScript/Web Usage
 

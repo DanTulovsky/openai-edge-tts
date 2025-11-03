@@ -1,6 +1,6 @@
 # server.py
 
-from flask import Flask, request, send_file, jsonify, Response
+from flask import Flask, request, send_file, jsonify, Response, make_response
 from gevent.pywsgi import WSGIServer
 from dotenv import load_dotenv
 import os
@@ -9,10 +9,15 @@ import json
 import base64
 from datetime import datetime
 
-from config import DEFAULT_CONFIGS
+from config import DEFAULT_CONFIGS, VERSION
 from handle_text import prepare_tts_input_with_context
-from tts_handler import generate_speech, generate_speech_stream, get_models_formatted, get_voices, get_voices_formatted
+from tts_handler import generate_speech, generate_speech_stream, get_models_formatted, get_voices, get_voices_formatted, is_ffmpeg_installed
 from utils import getenv_bool, require_api_key, AUDIO_FORMAT_MIME_TYPES, DETAILED_ERROR_LOGGING, DEBUG_STREAMING
+from hls_handler import (
+    create_hls_session, get_hls_session, generate_hls_stream,
+    start_cleanup_thread, HLS_SEGMENT_DURATION
+)
+import threading
 
 app = Flask(__name__)
 load_dotenv()
@@ -144,7 +149,7 @@ def text_to_speech():
         speed = float(data.get('speed', DEFAULT_SPEED))
 
         # Check stream format - "sse" or "audio_stream" trigger streaming
-        stream_format = data.get('stream_format', 'audio_stream')  # 'audio_stream' (default), 'audio', 'sse'
+        stream_format = data.get('stream_format', 'audio_stream')  # 'audio_stream' (default), 'audio', 'sse', 'hls'
 
         if DEBUG_STREAMING:
             request_params_time = datetime.now()
@@ -152,6 +157,35 @@ def text_to_speech():
                 f"[DEBUG_STREAMING] text_to_speech: Request received - text_length={len(text)}, voice={voice}, response_format={response_format}, speed={speed}, stream_format={stream_format}, model={data.get('model', 'N/A')}, timestamp={request_params_time}")
 
         mime_type = AUDIO_FORMAT_MIME_TYPES.get(response_format, "audio/mpeg")
+
+        if stream_format == 'hls':
+            # HLS streaming for iOS Safari support
+            # Check if FFmpeg is available (required for HLS)
+            if not is_ffmpeg_installed():
+                return jsonify({"error": "HLS streaming requires FFmpeg to be installed. Please install FFmpeg or use a different stream_format."}), 400
+
+            # HLS requires MP3 format
+            if response_format != 'mp3':
+                return jsonify({"error": "HLS streaming only supports MP3 format. Please set response_format to 'mp3'."}), 400
+
+            # Get segment duration from config or request
+            segment_duration = float(data.get('hls_segment_duration', HLS_SEGMENT_DURATION))
+
+            # Create HLS session
+            session_id = create_hls_session(segment_duration)
+
+            # Start background thread to generate segments from streaming audio
+            # This allows us to return immediately with the playlist URL
+            thread = threading.Thread(
+                target=generate_hls_stream,
+                args=(text, voice, speed, session_id),
+                daemon=True
+            )
+            thread.start()
+
+            # Return playlist URL immediately
+            playlist_url = f"/v1/audio/speech/hls/{session_id}/playlist.m3u8"
+            return jsonify({"playlist_url": playlist_url})
 
         if stream_format == 'sse':
             # Return SSE streaming response with JSON events
@@ -379,14 +413,172 @@ def azure_tts():
     return send_file(output_file_path, mimetype="audio/mpeg", as_attachment=True, download_name="speech.mp3")
 
 
+# HLS endpoint handlers
+@app.route('/v1/audio/speech/hls/<session_id>/playlist.m3u8', methods=['GET'])
+@app.route('/audio/speech/hls/<session_id>/playlist.m3u8', methods=['GET'])
+def serve_hls_playlist(session_id):
+    """Serve the HLS playlist file."""
+    session = get_hls_session(session_id)
+    if not session:
+        return jsonify({"error": "Session not found"}), 404
+
+    if not session.playlist_path.exists():
+        return jsonify({"error": "Playlist not yet available"}), 404
+
+    # Check if playlist has segments and if there's an error
+    with session.lock:
+        segment_counter = session.segment_counter
+        is_completed = session.completed
+        has_error = session.error is not None
+        error_message = session.error
+
+    # Check for actual segment files on disk
+    segment_files = list(session.segment_dir.glob("segment*.mp3"))
+    has_segment_files = len(segment_files) > 0
+
+    # Read and validate playlist content
+    playlist_content = ""
+    playlist_has_segments = False
+    playlist_lines = []
+
+    try:
+        with open(session.playlist_path, 'r') as f:
+            playlist_content = f.read()
+            playlist_lines = playlist_content.split('\n')
+            # Check for segment references: .mp3, .m4a, .ts files or segment### pattern
+            playlist_has_segments = any(
+                '.mp3' in line or '.m4a' in line or '.ts' in line or
+                'segment' in line.lower()
+                for line in playlist_lines
+                if line and not line.strip().startswith('#')
+            )
+    except Exception as e:
+        if DETAILED_ERROR_LOGGING:
+            print(f"Error reading playlist file: {e}")
+
+    # If there's an error, return it clearly
+    if has_error:
+        return jsonify({
+            "error": "HLS generation failed",
+            "details": error_message
+        }), 500
+
+    # Validate that we have segments (check both counter and actual files)
+    has_segments = segment_counter > 0 and has_segment_files and playlist_has_segments
+
+    # If completed but no segments, that's a critical error
+    if is_completed and not has_segments:
+        if DETAILED_ERROR_LOGGING:
+            print(f"HLS playlist validation failed - session_id={session_id}")
+            print(f"  segment_counter={segment_counter}")
+            print(f"  segment_files={len(segment_files)}")
+            print(f"  playlist_has_segments={playlist_has_segments}")
+            print(f"  playlist_lines={len(playlist_lines)}")
+            print(f"  playlist_content preview: {playlist_content[:200]}")
+
+        return jsonify({
+            "error": "HLS playlist is empty (no segments)",
+            "details": "The server may still be generating segments, or HLS implementation is incomplete. No segment files were found.",
+            "debug": {
+                "segment_counter": segment_counter,
+                "segment_files_count": len(segment_files),
+                "playlist_has_segment_refs": playlist_has_segments,
+                "playlist_line_count": len(playlist_lines)
+            }
+        }), 500
+
+    # If no segments yet and not completed, wait until the first segment exists.
+    # This guarantees the FIRST client request gets a valid HLS playlist (.m3u8).
+    if not has_segments and not is_completed:
+        if DETAILED_ERROR_LOGGING:
+            print(f"HLS playlist not ready yet - session_id={session_id}, segment_counter={segment_counter}. Waiting for first segment…")
+
+        import time as _t
+        while True:
+            with session.lock:
+                current_counter = session.segment_counter
+                error_now = session.error is not None
+                completed_now = session.completed
+            if error_now or completed_now:
+                break
+
+            if current_counter > 0:
+                # Verify the playlist file actually contains at least one segment reference
+                try:
+                    with open(session.playlist_path, 'r') as f:
+                        content_now = f.read()
+                        if '#EXTINF' in content_now:
+                            has_segments = True
+                            break
+                except Exception:
+                    pass
+            _t.sleep(0.05)  # 50ms
+
+        # Re-validate state after waiting
+        with session.lock:
+            is_completed = session.completed
+            has_error = session.error is not None
+            error_message = session.error
+            segment_counter = session.segment_counter
+        if has_error:
+            return jsonify({"error": "HLS generation failed", "details": error_message}), 500
+        if segment_counter == 0:
+            # Generation completed with no segments
+            return jsonify({"error": "HLS playlist is empty (no segments)"}), 500
+
+    # Serve the actual playlist
+    response = make_response(send_file(
+        session.playlist_path,
+        mimetype='application/vnd.apple.mpegurl'
+    ))
+
+    response.headers['Content-Type'] = 'application/vnd.apple.mpegurl'
+    response.headers['Cache-Control'] = 'no-cache, no-store, must-revalidate'
+    response.headers['Access-Control-Allow-Origin'] = '*'
+    response.headers['Access-Control-Allow-Methods'] = 'GET, HEAD, OPTIONS'
+    response.headers['Access-Control-Allow-Headers'] = 'Content-Type'
+    return response
+
+
+@app.route('/v1/audio/speech/hls/<session_id>/<segment_filename>', methods=['GET'])
+@app.route('/audio/speech/hls/<session_id>/<segment_filename>', methods=['GET'])
+def serve_hls_segment(session_id, segment_filename):
+    """Serve an HLS segment file."""
+    session = get_hls_session(session_id)
+    if not session:
+        return jsonify({"error": "Session not found"}), 404
+
+    segment_path = session.get_segment_path(segment_filename)
+    if not segment_path:
+        return jsonify({"error": "Segment not found"}), 404
+
+    response = make_response(send_file(
+        segment_path,
+        mimetype='audio/mpeg'
+    ))
+    response.headers['Content-Type'] = 'audio/mpeg'
+    response.headers['Cache-Control'] = 'public, max-age=3600'
+    response.headers['Access-Control-Allow-Origin'] = '*'
+    response.headers['Access-Control-Allow-Methods'] = 'GET, HEAD, OPTIONS'
+    response.headers['Access-Control-Allow-Headers'] = 'Content-Type'
+    return response
+
+
 print(f" Edge TTS (Free Azure TTS) Replacement for OpenAI's TTS API")
+print(f" Version: {VERSION}")
 print(f" ")
 print(f" * Serving OpenAI Edge TTS")
 print(f" * Server running on http://localhost:{PORT}")
 print(f" * TTS Endpoint: http://localhost:{PORT}/v1/audio/speech")
 print(f" * DEBUG_STREAMING: {'ENABLED - Streaming debug logs will be output' if DEBUG_STREAMING else 'DISABLED'}")
+print(f" * HLS Support: {'ENABLED' if is_ffmpeg_installed() else 'DISABLED (FFmpeg not installed)'}")
 print(f" ")
 
+# Start HLS cleanup thread on server startup
+if is_ffmpeg_installed():
+    start_cleanup_thread()
+
 if __name__ == '__main__':
-    http_server = WSGIServer(('0.0.0.0', PORT), app)
+    # Silence gevent's per-request access logs to keep test output compact
+    http_server = WSGIServer(('0.0.0.0', PORT), app, log=None)
     http_server.serve_forever()

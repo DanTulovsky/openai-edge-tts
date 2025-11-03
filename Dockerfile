@@ -1,6 +1,7 @@
 FROM python:3.12-slim
 
 ARG INSTALL_FFMPEG=false
+ARG VERSION=dev
 WORKDIR /app
 
 # Install ffmpeg conditionally
@@ -17,6 +18,7 @@ COPY app/ /app
 
 # Set Python to unbuffered mode for real-time output in Docker
 ENV PYTHONUNBUFFERED=1
+ENV APP_VERSION=${VERSION}
 
 # Command to run the server
 CMD ["python", "/app/server.py"]
