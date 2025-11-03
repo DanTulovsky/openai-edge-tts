@@ -11,6 +11,10 @@ import os
 import sys
 import time
 import json
+import tempfile
+import shutil
+import string
+from difflib import SequenceMatcher
 import subprocess
 import errno
 try:
@@ -126,35 +130,12 @@ def start_server(port: int):
 
 
 # (TEST_TEXT definition remains the same)
-TEST_TEXT = (
-    "This is a significantly longer paragraph intended to stress test the HLS streaming pipeline. "
-    "We are generating enough text so that the text-to-speech engine produces a sustained stream of audio chunks, "
-    "which should trigger multiple segments to be created by the server as the data arrives. "
-    "The goal is to ensure that the segmentation logic properly buffers incoming MP3 frames, finalizes segments at the "
-    "configured duration threshold, updates the playlist in real time, and ultimately allows an iOS Safari client to begin "
-    "progressive playback before the entire synthesis completes. By using a large paragraph with many sentences, commas, and "
-    "varied pacing, we simulate a realistic narration scenario. This helps us validate that the playlist begins empty, transitions "
-    "to contain the first segment within a short time window, and continues to grow predictably with additional segment references. "
-    "Furthermore, the test will verify that at least one segment can be fetched directly via HTTP and that the media bytes resemble "
-    "a valid MP3 stream, beginning with ID3 tags or a sync word. Finally, by exercising both the waiting-for-generation path and the "
-    "completed-stream path, we confirm that the playlist includes an #EXT-X-ENDLIST marker when synthesis finishes, ensuring clean "
-    "termination behavior for clients that fully buffer the stream. "
-    "In a real application, paragraphs of this size are common: think of podcasts, audiobooks, educational lectures, or long-form "
-    "explanatory content that must be delivered with minimal delay and maximum reliability. The ability to start playback while the "
-    "audio is still being synthesized is critical to perceived responsiveness, especially on mobile devices where buffering budgets "
-    "and user expectations are quite different from desktop environments. With HLS, the browser handles adaptive buffering, recovery, "
-    "and incremental fetching, as long as the playlist is well-formed and segments appear at predictable intervals. "
-    "This paragraph continues with additional details to further increase the audio duration and challenge the segmentation logic. "
-    "We expect the server to emit several segments of roughly equal duration, but if the final segment is shorter, the playlist "
-    "should still include it with an accurate #EXTINF duration. The client will then gracefully reach the #EXT-X-ENDLIST tag, signaling "
-    "that playback can end without waiting for any more data. If network conditions were variable, a live playlist could continue to grow, "
-    "but for this test we complete the synthesis so we can validate both the in-progress and completed phases. "
-    "Adding more sentences for load: The quick brown fox jumps over the lazy dog; this classic pangram ensures coverage of all letters. "
-    "Edge cases include pauses, punctuation, numbers like one hundred twenty-three point four five, and abbreviations like U.S.A. or e.g. "
-    "We also include proper nouns, product names, and occasionally foreign words such as déjà vu or résumé to verify pronunciation and flow. "
-    "Ultimately, this extended content should be more than sufficient to create multiple HLS segments during a single synthesis pass."
-)
-TEST_TEXT = TEST_TEXT + " " + TEST_TEXT
+TEST_TEXT = """
+There was something in the sky. What exactly was up there wasn't immediately clear. But there was definitely something in the sky and it was getting bigger and bigger.
+There was a time when this wouldn't have bothered her. The fact that it did actually bother her bothered her even more. What had changed in her life that such a small thing could annoy her so much for the entire day? She knew it was ridiculous that she even took notice of it, yet she was still obsessing over it as she tried to fall asleep.
+She considered the birds to be her friends. She'd put out food for them each morning and then she'd watch as they came to the feeders to gorge themselves for the day. She wondered what they would do if something ever happened to her. Would they miss the meals she provided if she failed to put out the food one morning?
+What were they eating? It didn't taste like anything she had ever eaten before and although she was famished, she didn't dare ask. She knew the answer would be one she didn't want to hear.
+"""
 
 
 def _segment_matcher(codec: str):
@@ -171,7 +152,124 @@ def _line_has_segment(line: str, codec: str) -> bool:
     return any(ext in low for ext in exts) or 'segment' in low
 
 
-def test_hls_streaming_codec(codec: str) -> bool:
+def _normalize_text(s: str) -> str:
+    table = str.maketrans('', '', string.punctuation)
+    return ' '.join(s.lower().translate(table).split())
+
+
+def _similarity(a: str, b: str) -> float:
+    return SequenceMatcher(None, a, b).ratio()
+
+
+def _ffmpeg_available() -> bool:
+    try:
+        subprocess.run(["ffmpeg", "-version"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=2)
+        return True
+    except Exception:
+        return False
+
+
+def _remux_playlist_to_wav(playlist_url: str, wav_path: Path) -> bool:
+    if not _ffmpeg_available():
+        print("   ERROR: ffmpeg is required for transcription verification but was not found in PATH")
+        return False
+    try:
+        # Remux/convert HLS playlist to mono 16k WAV for ASR
+        cmd = [
+            "ffmpeg", "-y", "-i", playlist_url,
+            "-vn", "-acodec", "pcm_s16le", "-ar", "16000", "-ac", "1",
+            str(wav_path)
+        ]
+        proc = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        if proc.returncode != 0:
+            print("   ERROR: ffmpeg failed to export WAV for transcription")
+            if proc.stderr:
+                print(proc.stderr.splitlines()[-1])
+            return False
+        return True
+    except Exception as e:
+        print(f"   ERROR: Exception while running ffmpeg: {e}")
+        return False
+
+
+def _transcribe_wav(wav_path: Path, model_name: str = "base") -> str:
+    try:
+        import whisper  # type: ignore
+    except Exception:
+        print("   ERROR: Python package 'whisper' is required. Install with: pip install openai-whisper")
+        return ""
+    try:
+        model = whisper.load_model(model_name)
+        result = model.transcribe(str(wav_path))
+        text = result.get("text", "") or ""
+        return text.strip()
+    except Exception as e:
+        print(f"   ERROR: Whisper transcription failed: {e}")
+        return ""
+
+
+def _print_side_by_side_diff(ref: str, hyp: str):
+    """Render a colorized side-by-side word diff using libraries.
+
+    - Uses diff-match-patch for word-level diffing
+    - Uses rich to render a two-column, full-width table with colors
+    Falls back to unified diff if dependencies are unavailable.
+    """
+    try:
+        from diff_match_patch import diff_match_patch  # type: ignore
+        from rich.console import Console
+        from rich.table import Table
+        from rich.text import Text
+
+        console = Console()
+        # Prepare word-level inputs
+        ref_words = ref.split()
+        hyp_words = hyp.split()
+        ref_join = "\n".join(ref_words) + "\n"
+        hyp_join = "\n".join(hyp_words) + "\n"
+
+        dmp = diff_match_patch()
+        # Use line-mode via linesToChars to treat each word as a line
+        chars1, chars2, line_array = dmp.diff_linesToChars(ref_join, hyp_join)
+        diffs = dmp.diff_main(chars1, chars2, False)
+        dmp.diff_cleanupSemantic(diffs)
+        # In diff-match-patch, diff_charsToLines mutates the diffs list in place (returns None)
+        dmp.diff_charsToLines(diffs, line_array)
+
+        left_text = Text()
+        right_text = Text()
+        for op, chunk in diffs:
+            words = [w for w in chunk.split("\n") if w]
+            if op == 0:  # EQUAL
+                if words:
+                    left_text.append(" ".join(words) + " ")
+                    right_text.append(" ".join(words) + " ")
+            elif op == -1:  # DELETE (in ref only)
+                if words:
+                    left_text.append(" ".join(words) + " ", style="bold red")
+            elif op == 1:  # INSERT (in hyp only)
+                if words:
+                    right_text.append(" ".join(words) + " ", style="yellow")
+
+        # Build side-by-side table using full terminal width
+        table = Table(expand=True, show_header=True, header_style="bold", pad_edge=False)
+        table.add_column("EXPECTED", ratio=1)
+        table.add_column("TRANSCRIPT", ratio=1)
+        table.add_row(left_text, right_text)
+
+        console.print("\n   --- Diff (normalized) ---")
+        console.print(table)
+    except Exception:
+        # Fallback to stdlib unified diff
+        import difflib
+        ref_lines = [w + "\n" for w in ref.split()]
+        hyp_lines = [w + "\n" for w in hyp.split()]
+        print("\n   --- Diff (normalized, fallback) ---")
+        for line in difflib.unified_diff(ref_lines, hyp_lines, fromfile='EXPECTED', tofile='TRANSCRIPT'):
+            print("   " + line.rstrip())
+
+
+def test_hls_streaming_codec(codec: str, verify_transcription: bool = False, transcribe_threshold: float = 0.75, transcribe_model: str = "base") -> bool:
     server_process = None
     try:
         port = _get_free_port()
@@ -312,17 +410,48 @@ def test_hls_streaming_codec(codec: str) -> bool:
         if not playlist_content.startswith('#EXTM3U'):
             print("   ERROR: Final playlist does not start with #EXTM3U")
             return False
+        success = True
+
+        # If requested, verify transcription BEFORE stopping the server
+        if success and verify_transcription:
+            try:
+                print("\n4. Verifying transcription against input text...")
+                with tempfile.TemporaryDirectory() as td:
+                    wav_path = Path(td) / "capture.wav"
+                    if not _remux_playlist_to_wav(full_playlist_url, wav_path):
+                        return False
+                    transcript = _transcribe_wav(wav_path, model_name=transcribe_model)
+                    if not transcript:
+                        print("   ERROR: Empty transcription result")
+                        return False
+                    norm_ref = _normalize_text(TEST_TEXT)
+                    norm_hyp = _normalize_text(transcript)
+                    score = _similarity(norm_ref, norm_hyp)
+                    print(f"   Transcription similarity: {score:.3f} (threshold {transcribe_threshold:.2f})")
+                    if score < transcribe_threshold:
+                        print("   ERROR: Transcription similarity below threshold")
+                        _print_side_by_side_diff(norm_ref, norm_hyp)
+                        return False
+                    print("   Transcription verification passed")
+            except Exception as e:
+                print(f"   ERROR: Transcription verification failed: {e}")
+                return False
         return True
     finally:
         if server_process:
             print("\nStopping server...")
             stop_server(server_process)
             print("Server stopped.")
+    # Should not reach here; success path returns above
+    return False
 
 
 if __name__ == "__main__":
     # Simple CLI: --codec mp3|aac  or  --mp3 / --aac
     selected = None
+    verify_transcription = False
+    transcribe_threshold = 0.75
+    transcribe_model = os.getenv("HLS_TEST_TRANSCRIBE_MODEL", "base")
     for arg in sys.argv[1:]:
         if arg.startswith("--codec="):
             selected = arg.split("=", 1)[1].strip().lower()
@@ -330,10 +459,19 @@ if __name__ == "__main__":
             selected = "mp3"
         elif arg == "--aac":
             selected = "aac"
+        elif arg == "--verify-transcription":
+            verify_transcription = True
+        elif arg.startswith("--transcribe-threshold="):
+            try:
+                transcribe_threshold = float(arg.split("=", 1)[1])
+            except Exception:
+                pass
+        elif arg.startswith("--transcribe-model="):
+            transcribe_model = arg.split("=", 1)[1].strip()
 
     if selected in ("mp3", "aac"):
         print(f"\n--- Running {selected.upper()} HLS test ---")
-        ok = test_hls_streaming_codec(selected)
+        ok = test_hls_streaming_codec(selected, verify_transcription=verify_transcription, transcribe_threshold=transcribe_threshold, transcribe_model=transcribe_model)
         if ok:
             print(f"\nSUCCESS: HLS {selected.upper()} test passed")
         else:
@@ -342,10 +480,10 @@ if __name__ == "__main__":
 
     # Default: run both
     print("\n--- Running MP3 HLS test ---")
-    ok_mp3 = test_hls_streaming_codec('mp3')
+    ok_mp3 = test_hls_streaming_codec('mp3', verify_transcription=verify_transcription, transcribe_threshold=transcribe_threshold, transcribe_model=transcribe_model)
     time.sleep(0.5)
     print("\n--- Running AAC HLS test ---")
-    ok_aac = test_hls_streaming_codec('aac')
+    ok_aac = test_hls_streaming_codec('aac', verify_transcription=verify_transcription, transcribe_threshold=transcribe_threshold, transcribe_model=transcribe_model)
     if ok_mp3:
         print("\nSUCCESS: HLS MP3 test passed")
     else:

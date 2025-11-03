@@ -3,3 +3,6 @@ gevent
 python-dotenv
 edge-tts
 emoji
+openai-whisper
+rich
+diff-match-patch
