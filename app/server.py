@@ -539,8 +539,16 @@ def serve_hls_playlist(session_id):
     # Serve the actual playlist
     response = make_response(send_file(
         session.playlist_path,
-        mimetype='application/vnd.apple.mpegurl'
+        mimetype='application/vnd.apple.mpegurl',
+        conditional=False
     ))
+
+    # Force 200 for playlists and remove range-related headers
+    response.status_code = 200
+    try:
+        response.headers.pop('Accept-Ranges')
+    except Exception:
+        pass
 
     response.headers['Content-Type'] = 'application/vnd.apple.mpegurl'
     response.headers['Cache-Control'] = 'no-cache, no-store, must-revalidate'
