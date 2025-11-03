@@ -15,5 +15,8 @@ RUN pip install -r requirements.txt
 # Copy the app directory
 COPY app/ /app
 
+# Set Python to unbuffered mode for real-time output in Docker
+ENV PYTHONUNBUFFERED=1
+
 # Command to run the server
 CMD ["python", "/app/server.py"]

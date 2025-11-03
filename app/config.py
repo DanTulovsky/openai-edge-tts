@@ -16,4 +16,5 @@ DEFAULT_CONFIGS = {
     "REMOVE_FILTER": False,
     "EXPAND_API": True,
     "DETAILED_ERROR_LOGGING": True,
-} 
+    "DEBUG_STREAMING": False,
+}

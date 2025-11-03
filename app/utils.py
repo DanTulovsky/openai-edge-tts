@@ -18,6 +18,7 @@ def getenv_bool(name: str, default: bool = False) -> bool:
 API_KEY = os.getenv('API_KEY', DEFAULT_CONFIGS["API_KEY"])
 REQUIRE_API_KEY = getenv_bool('REQUIRE_API_KEY', DEFAULT_CONFIGS["REQUIRE_API_KEY"])
 DETAILED_ERROR_LOGGING = getenv_bool('DETAILED_ERROR_LOGGING', DEFAULT_CONFIGS["DETAILED_ERROR_LOGGING"])
+DEBUG_STREAMING = getenv_bool('DEBUG_STREAMING', DEFAULT_CONFIGS["DEBUG_STREAMING"])
 
 def require_api_key(f):
     @wraps(f)

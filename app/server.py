@@ -7,11 +7,12 @@ import os
 import traceback
 import json
 import base64
+from datetime import datetime
 
 from config import DEFAULT_CONFIGS
 from handle_text import prepare_tts_input_with_context
 from tts_handler import generate_speech, generate_speech_stream, get_models_formatted, get_voices, get_voices_formatted
-from utils import getenv_bool, require_api_key, AUDIO_FORMAT_MIME_TYPES, DETAILED_ERROR_LOGGING
+from utils import getenv_bool, require_api_key, AUDIO_FORMAT_MIME_TYPES, DETAILED_ERROR_LOGGING, DEBUG_STREAMING
 
 app = Flask(__name__)
 load_dotenv()
@@ -73,11 +74,48 @@ def generate_sse_audio_stream(text, voice, speed):
 
 def generate_raw_audio_stream(text, voice, speed):
     """Generator function for raw audio streaming (following SSE pattern)."""
+    if DEBUG_STREAMING:
+        start_time = datetime.now()
+        print(f"[DEBUG_STREAMING] generate_raw_audio_stream: Entry - text_length={len(text)}, voice={voice}, speed={speed}, timestamp={start_time}")
+
     try:
+        chunk_count = 0
+        last_chunk_time = None
+
         # Use existing streaming infrastructure
         for chunk in generate_speech_stream(text, voice, speed):
+            chunk_received_time = datetime.now()
+            chunk_size = len(chunk)
+
+            if DEBUG_STREAMING:
+                if chunk_count == 0:
+                    first_chunk_delta = (chunk_received_time - start_time).total_seconds()
+                    print(f"[DEBUG_STREAMING] generate_raw_audio_stream: First chunk received - size={chunk_size} bytes, timestamp={chunk_received_time}, delta_from_start={first_chunk_delta:.3f}s")
+                else:
+                    if last_chunk_time:
+                        chunk_delta = (chunk_received_time - last_chunk_time).total_seconds()
+                        print(f"[DEBUG_STREAMING] generate_raw_audio_stream: Chunk received - chunk_num={chunk_count + 1}, size={chunk_size} bytes, timestamp={chunk_received_time}, delta_from_last_chunk={chunk_delta:.3f}s")
+                    else:
+                        print(f"[DEBUG_STREAMING] generate_raw_audio_stream: Chunk received - chunk_num={chunk_count + 1}, size={chunk_size} bytes, timestamp={chunk_received_time}")
+
+            chunk_count += 1
+
+            if DEBUG_STREAMING:
+                yield_time = datetime.now()
+                yield_delta = (yield_time - chunk_received_time).total_seconds()
+                print(f"[DEBUG_STREAMING] generate_raw_audio_stream: Yielding chunk to Flask Response - chunk_num={chunk_count}, size={chunk_size} bytes, timestamp={yield_time}, delta_from_receive={yield_delta:.3f}s")
+
             yield chunk  # Yield raw audio bytes directly
+            last_chunk_time = datetime.now() if DEBUG_STREAMING else None
+
+        if DEBUG_STREAMING:
+            end_time = datetime.now()
+            total_delta = (end_time - start_time).total_seconds()
+            print(f"[DEBUG_STREAMING] generate_raw_audio_stream: Completed - total_chunks={chunk_count}, total_time={total_delta:.3f}s, timestamp={end_time}")
     except Exception as e:
+        if DEBUG_STREAMING:
+            error_time = datetime.now()
+            print(f"[DEBUG_STREAMING] generate_raw_audio_stream: Error - {e}, timestamp={error_time}")
         print(f"Error during raw audio streaming: {e}")
         return
 
@@ -88,6 +126,8 @@ def generate_raw_audio_stream(text, voice, speed):
 @app.route('/audio/speech', methods=['POST'])  # Add this line for the alias
 @require_api_key
 def text_to_speech():
+    request_start_time = datetime.now() if DEBUG_STREAMING else None
+
     try:
         data = request.json
         if not data or 'input' not in data:
@@ -104,7 +144,12 @@ def text_to_speech():
         speed = float(data.get('speed', DEFAULT_SPEED))
 
         # Check stream format - "sse" or "audio_stream" trigger streaming
-        stream_format = data.get('stream_format', 'audio')  # 'audio' (default), 'sse', or 'audio_stream'
+        stream_format = data.get('stream_format', 'audio_stream')  # 'audio_stream' (default), 'audio', 'sse'
+
+        if DEBUG_STREAMING:
+            request_params_time = datetime.now()
+            print(
+                f"[DEBUG_STREAMING] text_to_speech: Request received - text_length={len(text)}, voice={voice}, response_format={response_format}, speed={speed}, stream_format={stream_format}, model={data.get('model', 'N/A')}, timestamp={request_params_time}")
 
         mime_type = AUDIO_FORMAT_MIME_TYPES.get(response_format, "audio/mpeg")
 
@@ -126,9 +171,48 @@ def text_to_speech():
             )
         elif stream_format == 'audio_stream':
             # Return raw audio streaming (follows SSE pattern)
+            if DEBUG_STREAMING:
+                stream_request_time = datetime.now()
+                print(f"[DEBUG_STREAMING] text_to_speech: audio_stream format detected - text_length={len(text)}, voice={voice}, speed={speed}, timestamp={stream_request_time}")
+
+            first_byte_sent = False
+            first_byte_time = None
+            stream_complete_time = None
+            total_bytes_sent = 0
+
             def generate():
-                for chunk in generate_raw_audio_stream(text, voice, speed):
-                    yield chunk
+                nonlocal first_byte_sent, first_byte_time, stream_complete_time, total_bytes_sent
+
+                if DEBUG_STREAMING:
+                    generate_start = datetime.now()
+                    generate_delta = (generate_start - stream_request_time).total_seconds()
+                    print(f"[DEBUG_STREAMING] text_to_speech: Streaming begins (generate function called) - timestamp={generate_start}, delta_from_request={generate_delta:.3f}s")
+
+                try:
+                    for chunk in generate_raw_audio_stream(text, voice, speed):
+                        if not first_byte_sent:
+                            first_byte_sent = True
+                            first_byte_time = datetime.now()
+                            first_byte_delta = (first_byte_time - request_start_time).total_seconds() if request_start_time else 0
+                            chunk_size = len(chunk)
+                            total_bytes_sent = chunk_size
+                            if DEBUG_STREAMING:
+                                print(f"[DEBUG_STREAMING] text_to_speech: FIRST AUDIO BYTE SENT TO CLIENT - size={chunk_size} bytes, timestamp={first_byte_time}, time_from_request_start={first_byte_delta:.3f}s")
+                        else:
+                            total_bytes_sent += len(chunk)
+
+                        yield chunk
+
+                    stream_complete_time = datetime.now()
+                    if DEBUG_STREAMING:
+                        stream_duration = (stream_complete_time - first_byte_time).total_seconds() if first_byte_time else 0
+                        total_time = (stream_complete_time - request_start_time).total_seconds() if request_start_time else 0
+                        print(f"[DEBUG_STREAMING] text_to_speech: STREAMING COMPLETE - total_bytes={total_bytes_sent}, stream_duration={stream_duration:.3f}s, total_time_from_request={total_time:.3f}s, timestamp={stream_complete_time}")
+                except Exception as e:
+                    if DEBUG_STREAMING:
+                        error_time = datetime.now()
+                        print(f"[DEBUG_STREAMING] text_to_speech: STREAMING ERROR - {e}, timestamp={error_time}")
+                    raise
 
             return Response(
                 generate(),
@@ -300,6 +384,7 @@ print(f" ")
 print(f" * Serving OpenAI Edge TTS")
 print(f" * Server running on http://localhost:{PORT}")
 print(f" * TTS Endpoint: http://localhost:{PORT}/v1/audio/speech")
+print(f" * DEBUG_STREAMING: {'ENABLED - Streaming debug logs will be output' if DEBUG_STREAMING else 'DISABLED'}")
 print(f" ")
 
 if __name__ == '__main__':
