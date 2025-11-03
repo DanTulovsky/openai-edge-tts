@@ -4,8 +4,7 @@ services:
     restart: unless-stopped
     build:
       context: .
-      args:
-        INSTALL_FFMPEG: ${INSTALL_FFMPEG_ARG:-false} # Controlled by env var or defaults to false
+      # Note: FFmpeg is always included via multi-stage build in Dockerfile
     ports:
       - '${PORT:-5050}:5050'
     env_file:

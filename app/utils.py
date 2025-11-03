@@ -23,6 +23,9 @@ DEBUG_STREAMING = getenv_bool('DEBUG_STREAMING', DEFAULT_CONFIGS["DEBUG_STREAMIN
 def require_api_key(f):
     @wraps(f)
     def decorated_function(*args, **kwargs):
+        # Skip API key check for OPTIONS requests (CORS preflight)
+        if request.method == 'OPTIONS':
+            return f(*args, **kwargs)
         if not REQUIRE_API_KEY:
             return f(*args, **kwargs)
         auth_header = request.headers.get('Authorization')

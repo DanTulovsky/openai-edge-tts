@@ -1,0 +1,6 @@
+-r requirements.txt
+openai-whisper
+rich
+diff-match-patch
+playwright
+

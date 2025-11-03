@@ -1,23 +1,21 @@
 # server.py
 
-from flask import Flask, request, send_file, jsonify, Response, make_response
+from flask import Flask, request, send_file, jsonify, Response, make_response, render_template
 from gevent.pywsgi import WSGIServer
 from dotenv import load_dotenv
 import os
 import traceback
 import json
 import base64
-from datetime import datetime
+from datetime import datetime, timedelta
 
 from config import DEFAULT_CONFIGS, VERSION
 from handle_text import prepare_tts_input_with_context
 from tts_handler import generate_speech, generate_speech_stream, get_models_formatted, get_voices, get_voices_formatted, is_ffmpeg_installed
 from utils import getenv_bool, require_api_key, AUDIO_FORMAT_MIME_TYPES, DETAILED_ERROR_LOGGING, DEBUG_STREAMING
-from hls_handler import (
-    create_hls_session, get_hls_session, generate_hls_stream,
-    start_cleanup_thread, HLS_SEGMENT_DURATION
-)
+# HLS support removed - previously imported hls_handler here
 import threading
+import uuid
 
 app = Flask(__name__)
 load_dotenv()
@@ -124,13 +122,93 @@ def generate_raw_audio_stream(text, voice, speed):
         print(f"Error during raw audio streaming: {e}")
         return
 
+
+# In-memory active streams registry for short-lived progressive streams
+_active_streams = {}
+
+
+@app.route('/v1/audio/speech/init', methods=['POST', 'OPTIONS'])
+@require_api_key
+def init_speech():
+    # Handle CORS preflight
+    if request.method == 'OPTIONS':
+        response = make_response()
+        response.headers['Access-Control-Allow-Origin'] = '*'
+        response.headers['Access-Control-Allow-Methods'] = 'POST, OPTIONS'
+        response.headers['Access-Control-Allow-Headers'] = 'Content-Type, Authorization'
+        return response
+
+    data = request.json or {}
+    if 'input' not in data:
+        return jsonify({'error': "Missing 'input' in request body"}), 400
+
+    stream_id = str(uuid.uuid4())
+    token = uuid.uuid4().hex
+    expires_at = datetime.now() + timedelta(seconds=60)  # 60s token lifetime
+    _active_streams[stream_id] = {
+        'input': data.get('input'),
+        'voice': data.get('voice', DEFAULT_VOICE),
+        'speed': float(data.get('speed', DEFAULT_SPEED)),
+        'response_format': data.get('response_format', DEFAULT_RESPONSE_FORMAT),
+        'token': token,
+        'expires_at': expires_at
+    }
+
+    return jsonify({'stream_id': stream_id, 'token': token})
+
+
+@app.route('/v1/audio/speech/stream/<stream_id>', methods=['GET'])
+def stream_speech(stream_id):
+    params = _active_streams.get(stream_id)
+    if not params:
+        return jsonify({'error': 'Stream not found'}), 404
+
+    # Validate token query param (we don't require Authorization header for audio element requests)
+    token = request.args.get('token')
+    if not token or token != params.get('token'):
+        return jsonify({'error': 'Unauthorized'}), 401
+
+    # Check expiry
+    expires_at = params.get('expires_at')
+    if expires_at and datetime.now() > expires_at:
+        _active_streams.pop(stream_id, None)
+        return jsonify({'error': 'Stream expired'}), 410
+
+    def generate_and_cleanup():
+        try:
+            for chunk in generate_raw_audio_stream(params['input'], params['voice'], params['speed']):
+                yield chunk
+        finally:
+            try:
+                _active_streams.pop(stream_id, None)
+            except Exception:
+                pass
+
+    return Response(
+        generate_and_cleanup(),
+        mimetype='audio/mpeg',
+        headers={
+            'Cache-Control': 'no-cache',
+            'Accept-Ranges': 'bytes',
+            'Access-Control-Allow-Origin': '*'
+        }
+    )
+
 # OpenAI endpoint format
 
 
-@app.route('/v1/audio/speech', methods=['POST'])
-@app.route('/audio/speech', methods=['POST'])  # Add this line for the alias
+@app.route('/v1/audio/speech', methods=['POST', 'OPTIONS'])
+@app.route('/audio/speech', methods=['POST', 'OPTIONS'])  # Add this line for the alias
 @require_api_key
 def text_to_speech():
+    # Handle CORS preflight requests
+    if request.method == 'OPTIONS':
+        response = make_response()
+        response.headers['Access-Control-Allow-Origin'] = '*'
+        response.headers['Access-Control-Allow-Methods'] = 'POST, OPTIONS'
+        response.headers['Access-Control-Allow-Headers'] = 'Content-Type, Authorization'
+        return response
+
     request_start_time = datetime.now() if DEBUG_STREAMING else None
 
     try:
@@ -159,28 +237,8 @@ def text_to_speech():
         mime_type = AUDIO_FORMAT_MIME_TYPES.get(response_format, "audio/mpeg")
 
         if stream_format == 'hls':
-            # HLS streaming for iOS Safari support
-            if not is_ffmpeg_installed():
-                return jsonify({"error": "HLS streaming requires FFmpeg to be installed. Please install FFmpeg or use a different stream_format."}), 400
-
-            # Allow mp3 or aac for HLS
-            if response_format not in ('mp3', 'aac'):
-                return jsonify({"error": "HLS streaming supports 'mp3' or 'aac' response_format"}), 400
-
-            segment_duration = float(data.get('hls_segment_duration', HLS_SEGMENT_DURATION))
-
-            # Create HLS session with codec
-            session_id = create_hls_session(segment_duration, codec=response_format)
-
-            thread = threading.Thread(
-                target=generate_hls_stream,
-                args=(text, voice, speed, session_id),
-                daemon=True
-            )
-            thread.start()
-
-            playlist_url = f"/v1/audio/speech/hls/{session_id}/playlist.m3u8"
-            return jsonify({"playlist_url": playlist_url})
+            # HLS removed: instruct clients to use progressive streaming
+            return jsonify({"error": "HLS streaming is no longer supported. Use 'audio_stream' or 'audio' formats."}), 400
 
         if stream_format == 'sse':
             # Return SSE streaming response with JSON events
@@ -195,7 +253,10 @@ def text_to_speech():
                     'Content-Type': 'text/event-stream',
                     'Cache-Control': 'no-cache',
                     'Connection': 'keep-alive',
-                    'X-Accel-Buffering': 'no'  # Disable nginx buffering
+                    'X-Accel-Buffering': 'no',  # Disable nginx buffering
+                    'Access-Control-Allow-Origin': '*',
+                    'Access-Control-Allow-Methods': 'POST, OPTIONS',
+                    'Access-Control-Allow-Headers': 'Content-Type, Authorization'
                 }
             )
         elif stream_format == 'audio_stream':
@@ -250,7 +311,10 @@ def text_to_speech():
                     'Content-Type': mime_type,
                     'Cache-Control': 'no-cache',
                     'Connection': 'keep-alive',
-                    'X-Accel-Buffering': 'no'
+                    'X-Accel-Buffering': 'no',
+                    'Access-Control-Allow-Origin': '*',
+                    'Access-Control-Allow-Methods': 'POST, OPTIONS',
+                    'Access-Control-Allow-Headers': 'Content-Type, Authorization'
                 }
             )
         else:
@@ -272,7 +336,10 @@ def text_to_speech():
                 mimetype=mime_type,
                 headers={
                     'Content-Type': mime_type,
-                    'Content-Length': str(len(audio_data))
+                    'Content-Length': str(len(audio_data)),
+                    'Access-Control-Allow-Origin': '*',
+                    'Access-Control-Allow-Methods': 'POST, OPTIONS',
+                    'Access-Control-Allow-Headers': 'Content-Type, Authorization'
                 }
             )
 
@@ -408,189 +475,10 @@ def azure_tts():
     return send_file(output_file_path, mimetype="audio/mpeg", as_attachment=True, download_name="speech.mp3")
 
 
-# HLS endpoint handlers
-@app.route('/v1/audio/speech/hls/<session_id>/playlist.m3u8', methods=['GET'])
-@app.route('/audio/speech/hls/<session_id>/playlist.m3u8', methods=['GET'])
-def serve_hls_playlist(session_id):
-    """Serve the HLS playlist file."""
-    session = get_hls_session(session_id)
-    if not session:
-        return jsonify({"error": "Session not found"}), 404
-
-    # Wait for playlist file to be created (aac/ffmpeg path may take a moment)
-    if not session.playlist_path.exists():
-        import time as _t
-        waited = 0.0
-        while waited < 5.0 and not session.playlist_path.exists():
-            _t.sleep(0.05)
-            waited += 0.05
-        # After waiting, if still not present, report generating
-        if not session.playlist_path.exists():
-            return jsonify({"error": "Playlist not yet available"}), 404
-
-    # Check if playlist has segments and if there's an error
-    with session.lock:
-        segment_counter = getattr(session, 'segment_counter', 0)
-        is_completed = getattr(session, 'completed', False)
-        has_error = getattr(session, 'error', None) is not None
-        error_message = getattr(session, 'error', None)
-
-    # Check for actual segment files on disk (works for both mp3 and aac)
-    segment_files = list(session.segment_dir.glob("segment*.*"))
-    has_segment_files = len(segment_files) > 0
-
-    # Read and validate playlist content
-    playlist_content = ""
-    playlist_has_segments = False
-    playlist_lines = []
-
-    try:
-        with open(session.playlist_path, 'r') as f:
-            playlist_content = f.read()
-            playlist_lines = playlist_content.split('\n')
-            # Check for segment references lines (not starting with #)
-            playlist_has_segments = any(
-                ('.mp3' in line.lower() or '.m4s' in line.lower() or '.m4a' in line.lower() or '.ts' in line.lower() or 'segment' in line.lower())
-                for line in playlist_lines if line and not line.strip().startswith('#')
-            )
-    except Exception as e:
-        if DETAILED_ERROR_LOGGING:
-            print(f"Error reading playlist file: {e}")
-
-    # If there's an error, return it clearly
-    if has_error:
-        return jsonify({
-            "error": "HLS generation failed",
-            "details": error_message
-        }), 500
-
-    # Validate that we have segments (check both counter and actual files)
-    has_segments = segment_counter > 0 and has_segment_files and playlist_has_segments
-
-    # If completed but no segments, that's a critical error
-    if is_completed and not has_segments:
-        if DETAILED_ERROR_LOGGING:
-            print(f"HLS playlist validation failed - session_id={session_id}")
-            print(f"  segment_counter={segment_counter}")
-            print(f"  segment_files={len(segment_files)}")
-            print(f"  playlist_has_segments={playlist_has_segments}")
-            print(f"  playlist_lines={len(playlist_lines)}")
-            print(f"  playlist_content preview: {playlist_content[:200]}")
-
-        return jsonify({
-            "error": "HLS playlist is empty (no segments)",
-            "details": "The server may still be generating segments, or HLS implementation is incomplete. No segment files were found.",
-            "debug": {
-                "segment_counter": segment_counter,
-                "segment_files_count": len(segment_files),
-                "playlist_has_segment_refs": playlist_has_segments,
-                "playlist_line_count": len(playlist_lines)
-            }
-        }), 500
-
-    # If no segments yet and not completed, wait until the first segment exists.
-    # This guarantees the FIRST client request gets a valid HLS playlist (.m3u8).
-    if not has_segments and not is_completed:
-        if DETAILED_ERROR_LOGGING:
-            print(f"HLS playlist not ready yet - session_id={session_id}, segment_counter={segment_counter}. Waiting for first segment…")
-
-        import time as _t
-        start_wait = _t.time()
-        max_wait = 20.0
-        while True:
-            with session.lock:
-                current_counter = getattr(session, 'segment_counter', 0)
-                error_now = getattr(session, 'error', None) is not None
-                completed_now = getattr(session, 'completed', False)
-            if error_now or completed_now:
-                break
-
-            if current_counter > 0:
-                # Verify the playlist file actually contains at least one segment reference
-                try:
-                    with open(session.playlist_path, 'r') as f:
-                        content_now = f.read()
-                        if '#EXTINF' in content_now:
-                            has_segments = True
-                            break
-                except Exception:
-                    pass
-            _t.sleep(0.05)  # 50ms
-            if (_t.time() - start_wait) > max_wait:
-                # Timed out waiting; advise client to retry
-                return make_response(jsonify({
-                    "error": "Playlist not yet available",
-                    "message": "Timed out waiting for first HLS segment.",
-                    "status": "generating"
-                }), 503)
-
-        # Re-validate state after waiting
-        with session.lock:
-            is_completed = session.completed
-            has_error = session.error is not None
-            error_message = session.error
-            segment_counter = session.segment_counter
-        if has_error:
-            return jsonify({"error": "HLS generation failed", "details": error_message}), 500
-        if segment_counter == 0:
-            # Generation completed with no segments
-            return jsonify({"error": "HLS playlist is empty (no segments)"}), 500
-
-    # Serve the actual playlist
-    response = make_response(send_file(
-        session.playlist_path,
-        mimetype='application/vnd.apple.mpegurl',
-        conditional=False
-    ))
-
-    # Force 200 for playlists and remove range-related headers
-    response.status_code = 200
-    try:
-        response.headers.pop('Accept-Ranges')
-    except Exception:
-        pass
-
-    response.headers['Content-Type'] = 'application/vnd.apple.mpegurl'
-    response.headers['Cache-Control'] = 'no-cache, no-store, must-revalidate'
-    response.headers['Access-Control-Allow-Origin'] = '*'
-    response.headers['Access-Control-Allow-Methods'] = 'GET, HEAD, OPTIONS'
-    response.headers['Access-Control-Allow-Headers'] = 'Content-Type'
-    return response
-
-
-@app.route('/v1/audio/speech/hls/<session_id>/<segment_filename>', methods=['GET'])
-@app.route('/audio/speech/hls/<session_id>/<segment_filename>', methods=['GET'])
-def serve_hls_segment(session_id, segment_filename):
-    """Serve an HLS segment file."""
-    session = get_hls_session(session_id)
-    if not session:
-        return jsonify({"error": "Session not found"}), 404
-
-    segment_path = session.get_segment_path(segment_filename)
-    if not segment_path:
-        return jsonify({"error": "Segment not found"}), 404
-
-    # Set MIME based on extension
-    ext = os.path.splitext(segment_filename)[1].lower()
-    if ext in ('.m4s', '.m4a', '.mp4'):
-        seg_mime = 'audio/mp4'
-    elif ext == '.ts':
-        seg_mime = 'video/mp2t'
-    elif ext == '.mp3':
-        seg_mime = 'audio/mpeg'
-    else:
-        seg_mime = 'application/octet-stream'
-
-    response = make_response(send_file(
-        segment_path,
-        mimetype=seg_mime
-    ))
-    response.headers['Content-Type'] = seg_mime
-    response.headers['Cache-Control'] = 'public, max-age=3600'
-    response.headers['Access-Control-Allow-Origin'] = '*'
-    response.headers['Access-Control-Allow-Methods'] = 'GET, HEAD, OPTIONS'
-    response.headers['Access-Control-Allow-Headers'] = 'Content-Type'
-    return response
+@app.route('/test', methods=['GET'])
+def test_page():
+    """Serve a test HTML page for TTS testing with OpenAI SDK playAudio helper."""
+    return render_template('test.html')
 
 
 print(f" Edge TTS (Free Azure TTS) Replacement for OpenAI's TTS API")
@@ -600,14 +488,23 @@ print(f" * Serving OpenAI Edge TTS")
 print(f" * Server running on http://localhost:{PORT}")
 print(f" * TTS Endpoint: http://localhost:{PORT}/v1/audio/speech")
 print(f" * DEBUG_STREAMING: {'ENABLED - Streaming debug logs will be output' if DEBUG_STREAMING else 'DISABLED'}")
-print(f" * HLS Support: {'ENABLED' if is_ffmpeg_installed() else 'DISABLED (FFmpeg not installed)'}")
+print(f" * HLS Support: REMOVED")
 print(f" ")
 
 # Start HLS cleanup thread on server startup
-if is_ffmpeg_installed():
-    start_cleanup_thread()
+# HLS cleanup thread removed
 
 if __name__ == '__main__':
-    # Silence gevent's per-request access logs to keep test output compact
-    http_server = WSGIServer(('0.0.0.0', PORT), app, log=None)
-    http_server.serve_forever()
+    # Check if debug mode is enabled via environment variable
+    flask_debug = getenv_bool('FLASK_DEBUG', False) or os.getenv('FLASK_ENV') == 'development'
+
+    if flask_debug:
+        # Use Flask's development server for better debugging (auto-reload, better error pages)
+        print(f" * Flask Debug Mode: ENABLED")
+        print(f" * Auto-reload: ENABLED")
+        app.run(host='0.0.0.0', port=PORT, debug=True, threaded=False)
+    else:
+        # Use gevent WSGI server for production
+        # Silence gevent's per-request access logs to keep test output compact
+        http_server = WSGIServer(('0.0.0.0', PORT), app, log=None)
+        http_server.serve_forever()

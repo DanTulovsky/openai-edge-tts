@@ -224,6 +224,14 @@ Use `pip` to install the required packages listed in `requirements.txt`:
 pip install -r requirements.txt
 ```
 
+If you want to run the Python tests locally, install the test-only dependencies:
+
+```bash
+pip install -r requirements-test.txt
+```
+
+Note: The Docker image installs only `requirements.txt` to keep the runtime image minimal; test-only packages are excluded from the image.
+
 ### 4. Configure Environment Variables
 
 Create a `.env` file in the root directory and set the following variables:
@@ -677,3 +685,22 @@ docker run -d -p 5050:5050 -e API_KEY=your_api_key_here -e PORT=5050 travisvn/op
 # Voice Samples 🎙️
 
 [Play voice samples and see all available Edge TTS voices](https://tts.travisvn.com/)
+
+---
+
+## Nginx proxy configuration for HLS (Range/HEAD)
+
+When proxying through Nginx, ensure byte range requests are preserved and advertised for HLS init/segment files. Example:
+
+```nginx
+location ~ /v1/audio/speech/hls/.+\.(m4s|m4a|mp3)$ {
+  proxy_pass http://127.0.0.1:5050;
+  proxy_http_version 1.1;
+  proxy_set_header Connection "";
+  proxy_pass_request_headers on;
+  proxy_force_ranges on;
+  add_header Accept-Ranges bytes always;
+}
+```
+
+Keep playlist responses 200-only without Accept-Ranges; segments/init may be 200 or 206 with proper `Content-Range` and `Accept-Ranges: bytes`.

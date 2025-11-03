@@ -12,10 +12,10 @@ NC='\033[0m' # No Color
 # Default values
 IMAGE_NAME=${IMAGE_NAME:-"mrwetsnow/openai-edge-tts"}
 TAG=""
-INSTALL_FFMPEG=${INSTALL_FFMPEG_ARG:-false}
 PUSH=false
 NO_CACHE=false
 VERSION_FILE=".version"
+# Note: FFmpeg is now always included via multi-stage build in Dockerfile
 
 # Parse command line arguments
 while [[ $# -gt 0 ]]; do
@@ -37,7 +37,7 @@ while [[ $# -gt 0 ]]; do
       shift 2
       ;;
     --ffmpeg)
-      INSTALL_FFMPEG=true
+      # FFmpeg is now always included (no-op for backward compatibility)
       shift
       ;;
     --no-cache)
@@ -54,7 +54,7 @@ while [[ $# -gt 0 ]]; do
       echo "  --tag TAG       Image tag (default: auto-generated date-based version)"
       echo "  --no-version    Don't generate version tag, only use specified tag or latest"
       echo "  --name NAME     Image name (default: mrwetsnow/openai-edge-tts)"
-      echo "  --ffmpeg        Include FFmpeg in the build"
+      echo "  --ffmpeg        (deprecated: FFmpeg is always included)"
       echo "  --no-cache      Build without using cache"
       echo "  --help          Show this help message"
       echo ""
@@ -62,7 +62,7 @@ while [[ $# -gt 0 ]]; do
       echo "  $0                                    # Build local only"
       echo "  $0 --push                            # Build and push"
       echo "  $0 --push --tag v2.0.0               # Build, tag, and push"
-      echo "  $0 --push --ffmpeg                   # Build with FFmpeg and push"
+      echo "  $0 --push --ffmpeg                   # Build and push (FFmpeg always included)"
       exit 0
       ;;
     *)
@@ -139,7 +139,7 @@ echo -e "${BLUE}Building multi-platform Docker image${NC}"
 echo -e "  Image: ${GREEN}${IMAGE_NAME}${NC}"
 echo -e "  Tags: ${GREEN}${TAG}${NC}" $(if [ -n "$VERSION_TAG" ]; then echo -e "+ ${GREEN}${VERSION_TAG}${NC}"; fi)
 echo -e "  Platforms: ${GREEN}linux/amd64,linux/arm64${NC}"
-echo -e "  FFmpeg: ${GREEN}${INSTALL_FFMPEG}${NC}"
+echo -e "  FFmpeg: ${GREEN}Always included${NC}"
 echo -e "  Push: ${GREEN}${PUSH}${NC}"
 echo -e "  No Cache: ${GREEN}${NO_CACHE}${NC}"
 echo ""
@@ -156,7 +156,6 @@ if ! docker buildx version > /dev/null 2>&1; then
         VERSION_ARG="--build-arg VERSION=${TAG:-dev}"
     fi
     docker build -t "${IMAGE_NAME}:${TAG}" \
-                 --build-arg INSTALL_FFMPEG=${INSTALL_FFMPEG} \
                  ${VERSION_ARG} \
                  .
     exit 0
@@ -174,7 +173,6 @@ fi
 
 # Build args
 BUILD_ARGS="--platform linux/amd64,linux/arm64"
-BUILD_ARGS="${BUILD_ARGS} --build-arg INSTALL_FFMPEG=${INSTALL_FFMPEG}"
 # Pass version as build arg (use VERSION_TAG if available, otherwise use TAG or 'dev')
 if [ -n "$VERSION_TAG" ]; then
     BUILD_ARGS="${BUILD_ARGS} --build-arg VERSION=${VERSION_TAG}"
@@ -182,16 +180,6 @@ else
     BUILD_ARGS="${BUILD_ARGS} --build-arg VERSION=${TAG:-dev}"
 fi
 BUILD_ARGS="${BUILD_ARGS} ${TAGS_TO_BUILD}"
-
-# Add tag suffix for FFmpeg builds
-if [ "$INSTALL_FFMPEG" = true ]; then
-    FFMPEG_TAG="${TAG}-ffmpeg"
-    BUILD_ARGS="${BUILD_ARGS} -t ${IMAGE_NAME}:${FFMPEG_TAG}"
-    if [ -n "$VERSION_TAG" ]; then
-        FFMPEG_VERSION_TAG="${VERSION_TAG}-ffmpeg"
-        BUILD_ARGS="${BUILD_ARGS} -t ${IMAGE_NAME}:${FFMPEG_VERSION_TAG}"
-    fi
-fi
 
 # Multi-platform builds require --push; cannot use --load
 if [ "$PUSH" = false ]; then
@@ -222,21 +210,13 @@ if [ "$PUSH" = false ]; then
     fi
 
     ${BUILD_CMD} ${TAG_CMDS} \
-                 --build-arg INSTALL_FFMPEG=${INSTALL_FFMPEG} \
                  ${VERSION_ARG} \
                  .
-
-    if [ "$INSTALL_FFMPEG" = true ]; then
-        docker tag "${IMAGE_NAME}:${TAG}" "${IMAGE_NAME}:${FFMPEG_TAG}"
-        if [ -n "$VERSION_TAG" ]; then
-            docker tag "${IMAGE_NAME}:${VERSION_TAG}" "${IMAGE_NAME}:${FFMPEG_VERSION_TAG}"
-        fi
-    fi
 
     echo -e "${GREEN}✓ Build complete!${NC}"
     echo ""
     echo "For multi-platform builds, use --push flag:"
-    echo "  ./build-multi-platform.sh --ffmpeg --push"
+    echo "  ./build-multi-platform.sh --push"
     exit 0
 fi
 
@@ -244,6 +224,10 @@ BUILD_ARGS="${BUILD_ARGS} --push"
 
 if [ "$NO_CACHE" = true ]; then
     BUILD_ARGS="${BUILD_ARGS} --no-cache"
+else
+    # Add registry cache for layer caching
+    BUILD_ARGS="${BUILD_ARGS} --cache-to type=registry,ref=${IMAGE_NAME}:buildcache,mode=max"
+    BUILD_ARGS="${BUILD_ARGS} --cache-from type=registry,ref=${IMAGE_NAME}:buildcache"
 fi
 
 echo -e "${BLUE}Starting multi-platform build...${NC}"
@@ -255,11 +239,5 @@ echo "Verify multi-platform support with:"
 echo "  docker buildx imagetools inspect ${IMAGE_NAME}:${TAG}"
 if [ -n "$VERSION_TAG" ]; then
     echo "  docker buildx imagetools inspect ${IMAGE_NAME}:${VERSION_TAG}"
-fi
-if [ "$INSTALL_FFMPEG" = true ]; then
-    echo "  docker buildx imagetools inspect ${IMAGE_NAME}:${FFMPEG_TAG}"
-    if [ -n "$VERSION_TAG" ]; then
-        echo "  docker buildx imagetools inspect ${IMAGE_NAME}:${FFMPEG_VERSION_TAG}"
-    fi
 fi
 

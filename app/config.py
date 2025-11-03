@@ -12,7 +12,7 @@ DEFAULT_CONFIGS = {
 
     # TTS settings
     "DEFAULT_VOICE": 'en-US-AvaNeural',
-    "DEFAULT_RESPONSE_FORMAT": 'mp3',
+    "DEFAULT_RESPONSE_FORMAT": 'aac',
     "DEFAULT_SPEED": 1.0,
     "DEFAULT_LANGUAGE": 'en-US',
 
