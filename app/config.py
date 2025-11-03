@@ -22,8 +22,4 @@ DEFAULT_CONFIGS = {
     "EXPAND_API": True,
     "DETAILED_ERROR_LOGGING": True,
     "DEBUG_STREAMING": False,
-
-    # HLS settings
-    "HLS_SEGMENT_DURATION": 4.0,  # Segment duration in seconds (default 5, prefer 3 if technically feasible)
-    "HLS_CLEANUP_TIMEOUT": 300,  # Clean up sessions older than this many seconds (5 minutes)
 }

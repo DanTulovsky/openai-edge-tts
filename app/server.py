@@ -13,8 +13,6 @@ from config import DEFAULT_CONFIGS, VERSION
 from handle_text import prepare_tts_input_with_context
 from tts_handler import generate_speech, generate_speech_stream, get_models_formatted, get_voices, get_voices_formatted, is_ffmpeg_installed
 from utils import getenv_bool, require_api_key, AUDIO_FORMAT_MIME_TYPES, DETAILED_ERROR_LOGGING, DEBUG_STREAMING
-# HLS support removed - previously imported hls_handler here
-import threading
 import uuid
 
 app = Flask(__name__)
@@ -227,7 +225,7 @@ def text_to_speech():
         speed = float(data.get('speed', DEFAULT_SPEED))
 
         # Check stream format - "sse" or "audio_stream" trigger streaming
-        stream_format = data.get('stream_format', 'audio_stream')  # 'audio_stream' (default), 'audio', 'sse', 'hls'
+        stream_format = data.get('stream_format', 'audio_stream')  # 'audio_stream' (default), 'audio', 'sse'
 
         if DEBUG_STREAMING:
             request_params_time = datetime.now()
@@ -235,10 +233,6 @@ def text_to_speech():
                 f"[DEBUG_STREAMING] text_to_speech: Request received - text_length={len(text)}, voice={voice}, response_format={response_format}, speed={speed}, stream_format={stream_format}, model={data.get('model', 'N/A')}, timestamp={request_params_time}")
 
         mime_type = AUDIO_FORMAT_MIME_TYPES.get(response_format, "audio/mpeg")
-
-        if stream_format == 'hls':
-            # HLS removed: instruct clients to use progressive streaming
-            return jsonify({"error": "HLS streaming is no longer supported. Use 'audio_stream' or 'audio' formats."}), 400
 
         if stream_format == 'sse':
             # Return SSE streaming response with JSON events
@@ -488,11 +482,7 @@ print(f" * Serving OpenAI Edge TTS")
 print(f" * Server running on http://localhost:{PORT}")
 print(f" * TTS Endpoint: http://localhost:{PORT}/v1/audio/speech")
 print(f" * DEBUG_STREAMING: {'ENABLED - Streaming debug logs will be output' if DEBUG_STREAMING else 'DISABLED'}")
-print(f" * HLS Support: REMOVED")
 print(f" ")
-
-# Start HLS cleanup thread on server startup
-# HLS cleanup thread removed
 
 if __name__ == '__main__':
     # Check if debug mode is enabled via environment variable

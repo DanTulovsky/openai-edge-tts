@@ -18,7 +18,7 @@ function isIOSSafari() {
     return isIOS || (isSafari && typeof MediaSource === 'undefined');
 }
 
-// Progressive audio streaming using MediaSource API (desktop) or HLS (iOS Safari)
+// Progressive audio streaming using MediaSource API (desktop)
 // Starts playing as soon as the first chunk arrives
 async function playAudioWithStop(response) {
     // Stop any existing playback
@@ -52,9 +52,9 @@ async function playAudioWithStop(response) {
             console.log(`Using MediaSource API for progressive playback (${mimeType})`);
             return await playWithMediaSource(response, mimeType);
         } else {
-            // iOS Safari or unsupported format - should not happen with proper endpoint selection
-            console.warn(`MediaSource not available, this should use HLS endpoint instead`);
-            throw new Error('MediaSource not supported. For iOS Safari, use stream_format=hls');
+            // Unsupported format or MediaSource not available
+            console.warn('MediaSource not available for this browser or MIME type');
+            throw new Error('MediaSource not supported in this browser.');
         }
     } else {
         // Non-streaming response - use blob directly
@@ -93,165 +93,7 @@ async function playAudioWithStop(response) {
     }
 }
 
-// Progressive HLS playback for iOS Safari
-async function playWithHLS(playlistUrl) {
-    console.log(`Using HLS for iOS Safari: ${playlistUrl}`);
-
-    // Ensure absolute URL - iOS Safari requires full URL
-    const baseURL = `${window.location.protocol}//${window.location.host}`;
-    let fullPlaylistUrl = playlistUrl.startsWith('http') ? playlistUrl : `${baseURL}${playlistUrl}`;
-
-    // Ensure the URL starts with the protocol
-    if (!fullPlaylistUrl.startsWith('http://') && !fullPlaylistUrl.startsWith('https://')) {
-        fullPlaylistUrl = `${window.location.protocol}//${window.location.host}${playlistUrl}`;
-    }
-
-    console.log(`Full HLS playlist URL: ${fullPlaylistUrl}`);
-
-    // Wait for playlist to be ready with at least one segment
-    // The server waits for segments, but we should verify the playlist is accessible
-    let playlistReady = false;
-    let attempts = 0;
-    const maxAttempts = 40; // 4 seconds total (40 * 100ms)
-    let lastError = null;
-
-    while (!playlistReady && attempts < maxAttempts) {
-        try {
-            // Try fetching the actual playlist to see if it has segments
-            const playlistResponse = await fetch(fullPlaylistUrl);
-            if (playlistResponse.ok) {
-                const playlistText = await playlistResponse.text();
-                // Check if playlist has at least one segment (#EXTINF)
-                if (playlistText.includes('#EXTINF')) {
-                    playlistReady = true;
-                    console.log('HLS playlist ready with segments');
-                    break;
-                } else {
-                    console.log(`Playlist exists but no segments yet (attempt ${attempts + 1}/${maxAttempts})...`);
-                }
-            } else {
-                lastError = `Playlist fetch returned ${playlistResponse.status}: ${playlistResponse.statusText}`;
-                console.log(`Waiting for playlist (attempt ${attempts + 1}/${maxAttempts})... Status: ${playlistResponse.status}`);
-            }
-        } catch (e) {
-            lastError = e.message;
-            console.log(`Waiting for playlist (attempt ${attempts + 1}/${maxAttempts})... Error: ${e.message}`);
-        }
-        attempts++;
-        await new Promise(resolve => setTimeout(resolve, 100));
-    }
-
-    if (!playlistReady) {
-        throw new Error(`HLS playlist not ready - timed out waiting for segments. Last error: ${lastError || 'unknown'}`);
-    }
-
-    // Create audio element with HLS playlist
-    const audio = new Audio();
-    currentAudioElement = audio;
-    isPlaying = true;
-
-    try {
-        // Set the source and load
-        audio.src = fullPlaylistUrl;
-
-        // Wait for canplay event before trying to play
-        await new Promise((resolve, reject) => {
-            const timeout = setTimeout(() => {
-                const errorMsg = audio.error
-                    ? `Audio error code ${audio.error.code}: ${audio.error.message || 'Unknown error'}`
-                    : 'Timeout waiting for audio to be ready';
-                reject(new Error(errorMsg));
-            }, 10000); // Increased timeout to 10 seconds
-
-            const cleanup = () => {
-                clearTimeout(timeout);
-                audio.removeEventListener('canplay', onCanPlay);
-                audio.removeEventListener('canplaythrough', onCanPlayThrough);
-                audio.removeEventListener('error', onError);
-                audio.removeEventListener('loadstart', onLoadStart);
-                audio.removeEventListener('loadedmetadata', onLoadedMetadata);
-            };
-
-            const onCanPlay = () => {
-                console.log('HLS: Can play');
-                cleanup();
-                resolve();
-            };
-
-            const onCanPlayThrough = () => {
-                console.log('HLS: Can play through');
-                cleanup();
-                resolve();
-            };
-
-            const onError = (e) => {
-                const errorMsg = audio.error
-                    ? `Audio error code ${audio.error.code}: ${audio.error.message || 'Unknown error'}`
-                    : 'Audio element error';
-                console.error('HLS Audio error:', errorMsg, audio.error);
-                cleanup();
-                reject(new Error(errorMsg));
-            };
-
-            const onLoadStart = () => {
-                console.log('HLS: Load started');
-            };
-
-            const onLoadedMetadata = () => {
-                console.log('HLS: Metadata loaded');
-            };
-
-            // Add event listeners for debugging
-            audio.addEventListener('loadstart', onLoadStart, { once: true });
-            audio.addEventListener('loadedmetadata', onLoadedMetadata, { once: true });
-
-            // These will resolve the promise
-            audio.addEventListener('canplay', onCanPlay, { once: true });
-            audio.addEventListener('canplaythrough', onCanPlayThrough, { once: true });
-            audio.addEventListener('error', onError, { once: true });
-
-            // Start loading
-            audio.load();
-        });
-
-        await audio.play();
-        console.log('HLS playback started');
-    } catch (err) {
-        console.error('Error starting HLS playback:', err);
-        console.error('Playlist URL was:', fullPlaylistUrl);
-        if (audio.error) {
-            console.error('Audio error details:', {
-                code: audio.error.code,
-                message: audio.error.message
-            });
-        }
-        stopCurrentPlayback();
-        throw err;
-    }
-
-    // Wait for playback to complete
-    await new Promise((resolve, reject) => {
-        audio.onended = () => {
-            console.log('HLS playback ended normally');
-            isPlaying = false;
-            currentAudioElement = null;
-            resolve();
-        };
-        audio.onerror = (e) => {
-            console.error('HLS playback error:', e);
-            isPlaying = false;
-            currentAudioElement = null;
-            reject(e);
-        };
-        audio.onpause = () => {
-            if (shouldStop) {
-                isPlaying = false;
-                currentAudioElement = null;
-                resolve();
-            }
-        };
-    });
-}
+// (HLS support removed)
 
 // Progressive playback using MediaSource API
 async function playWithMediaSource(response, mimeType) {
