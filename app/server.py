@@ -160,22 +160,18 @@ def text_to_speech():
 
         if stream_format == 'hls':
             # HLS streaming for iOS Safari support
-            # Check if FFmpeg is available (required for HLS)
             if not is_ffmpeg_installed():
                 return jsonify({"error": "HLS streaming requires FFmpeg to be installed. Please install FFmpeg or use a different stream_format."}), 400
 
-            # HLS requires MP3 format
-            if response_format != 'mp3':
-                return jsonify({"error": "HLS streaming only supports MP3 format. Please set response_format to 'mp3'."}), 400
+            # Allow mp3 or aac for HLS
+            if response_format not in ('mp3', 'aac'):
+                return jsonify({"error": "HLS streaming supports 'mp3' or 'aac' response_format"}), 400
 
-            # Get segment duration from config or request
             segment_duration = float(data.get('hls_segment_duration', HLS_SEGMENT_DURATION))
 
-            # Create HLS session
-            session_id = create_hls_session(segment_duration)
+            # Create HLS session with codec
+            session_id = create_hls_session(segment_duration, codec=response_format)
 
-            # Start background thread to generate segments from streaming audio
-            # This allows us to return immediately with the playlist URL
             thread = threading.Thread(
                 target=generate_hls_stream,
                 args=(text, voice, speed, session_id),
@@ -183,7 +179,6 @@ def text_to_speech():
             )
             thread.start()
 
-            # Return playlist URL immediately
             playlist_url = f"/v1/audio/speech/hls/{session_id}/playlist.m3u8"
             return jsonify({"playlist_url": playlist_url})
 
@@ -422,18 +417,26 @@ def serve_hls_playlist(session_id):
     if not session:
         return jsonify({"error": "Session not found"}), 404
 
+    # Wait for playlist file to be created (aac/ffmpeg path may take a moment)
     if not session.playlist_path.exists():
-        return jsonify({"error": "Playlist not yet available"}), 404
+        import time as _t
+        waited = 0.0
+        while waited < 5.0 and not session.playlist_path.exists():
+            _t.sleep(0.05)
+            waited += 0.05
+        # After waiting, if still not present, report generating
+        if not session.playlist_path.exists():
+            return jsonify({"error": "Playlist not yet available"}), 404
 
     # Check if playlist has segments and if there's an error
     with session.lock:
-        segment_counter = session.segment_counter
-        is_completed = session.completed
-        has_error = session.error is not None
-        error_message = session.error
+        segment_counter = getattr(session, 'segment_counter', 0)
+        is_completed = getattr(session, 'completed', False)
+        has_error = getattr(session, 'error', None) is not None
+        error_message = getattr(session, 'error', None)
 
-    # Check for actual segment files on disk
-    segment_files = list(session.segment_dir.glob("segment*.mp3"))
+    # Check for actual segment files on disk (works for both mp3 and aac)
+    segment_files = list(session.segment_dir.glob("segment*.*"))
     has_segment_files = len(segment_files) > 0
 
     # Read and validate playlist content
@@ -445,12 +448,10 @@ def serve_hls_playlist(session_id):
         with open(session.playlist_path, 'r') as f:
             playlist_content = f.read()
             playlist_lines = playlist_content.split('\n')
-            # Check for segment references: .mp3, .m4a, .ts files or segment### pattern
+            # Check for segment references lines (not starting with #)
             playlist_has_segments = any(
-                '.mp3' in line or '.m4a' in line or '.ts' in line or
-                'segment' in line.lower()
-                for line in playlist_lines
-                if line and not line.strip().startswith('#')
+                ('.mp3' in line.lower() or '.m4s' in line.lower() or '.m4a' in line.lower() or '.ts' in line.lower() or 'segment' in line.lower())
+                for line in playlist_lines if line and not line.strip().startswith('#')
             )
     except Exception as e:
         if DETAILED_ERROR_LOGGING:
@@ -494,11 +495,13 @@ def serve_hls_playlist(session_id):
             print(f"HLS playlist not ready yet - session_id={session_id}, segment_counter={segment_counter}. Waiting for first segment…")
 
         import time as _t
+        start_wait = _t.time()
+        max_wait = 20.0
         while True:
             with session.lock:
-                current_counter = session.segment_counter
-                error_now = session.error is not None
-                completed_now = session.completed
+                current_counter = getattr(session, 'segment_counter', 0)
+                error_now = getattr(session, 'error', None) is not None
+                completed_now = getattr(session, 'completed', False)
             if error_now or completed_now:
                 break
 
@@ -513,6 +516,13 @@ def serve_hls_playlist(session_id):
                 except Exception:
                     pass
             _t.sleep(0.05)  # 50ms
+            if (_t.time() - start_wait) > max_wait:
+                # Timed out waiting; advise client to retry
+                return make_response(jsonify({
+                    "error": "Playlist not yet available",
+                    "message": "Timed out waiting for first HLS segment.",
+                    "status": "generating"
+                }), 503)
 
         # Re-validate state after waiting
         with session.lock:
@@ -552,11 +562,22 @@ def serve_hls_segment(session_id, segment_filename):
     if not segment_path:
         return jsonify({"error": "Segment not found"}), 404
 
+    # Set MIME based on extension
+    ext = os.path.splitext(segment_filename)[1].lower()
+    if ext in ('.m4s', '.m4a', '.mp4'):
+        seg_mime = 'audio/mp4'
+    elif ext == '.ts':
+        seg_mime = 'video/mp2t'
+    elif ext == '.mp3':
+        seg_mime = 'audio/mpeg'
+    else:
+        seg_mime = 'application/octet-stream'
+
     response = make_response(send_file(
         segment_path,
-        mimetype='audio/mpeg'
+        mimetype=seg_mime
     ))
-    response.headers['Content-Type'] = 'audio/mpeg'
+    response.headers['Content-Type'] = seg_mime
     response.headers['Cache-Control'] = 'public, max-age=3600'
     response.headers['Access-Control-Allow-Origin'] = '*'
     response.headers['Access-Control-Allow-Methods'] = 'GET, HEAD, OPTIONS'
