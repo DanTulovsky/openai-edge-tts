@@ -10,12 +10,13 @@ let isPlaying = false;
 let shouldStop = false;
 let streamReader = null;
 
-// Detect iOS Safari
-function isIOSSafari() {
-    const ua = navigator.userAgent;
-    const isIOS = /iPad|iPhone|iPod/.test(ua);
-    const isSafari = /^((?!chrome|android).)*safari/i.test(ua);
-    return isIOS || (isSafari && typeof MediaSource === 'undefined');
+// Detect Apple Safari (desktop and mobile). We prefer native audio playback on
+// Safari because MediaSource + raw MP3/AAC chunks is unreliable there.
+function isAppleSafari() {
+    const ua = navigator.userAgent || '';
+    const isSafari = /Safari/.test(ua) && !/Chrome|Chromium|CriOS|FxiOS|Edg|OPR/.test(ua);
+    const isAppleVendor = navigator.vendor && navigator.vendor.includes('Apple');
+    return isSafari || isAppleVendor;
 }
 
 // Progressive audio streaming using MediaSource API (desktop)
@@ -46,15 +47,39 @@ async function playAudioWithStop(response) {
         // Check if MediaSource is supported and format is compatible
         const useMediaSource = typeof MediaSource !== 'undefined' &&
             MediaSource.isTypeSupported(mimeType) &&
-            !isIOSSafari();
+            !isAppleSafari();
 
         if (useMediaSource) {
             console.log(`Using MediaSource API for progressive playback (${mimeType})`);
             return await playWithMediaSource(response, mimeType);
         } else {
             // Unsupported format or MediaSource not available
-            console.warn('MediaSource not available for this browser or MIME type');
-            throw new Error('MediaSource not supported in this browser.');
+            console.warn('MediaSource not available for this browser or MIME type - falling back to native audio.src');
+            // Fall back to native audio playback using a blob URL for this response.
+            // This is a pragmatic fallback for browsers (like Safari) that don't
+            // handle MSE for raw MP3/AAC bytes well.
+            const blob = await response.blob();
+            const url = URL.createObjectURL(blob);
+            const audio = new Audio(url);
+            currentAudioElement = audio;
+            isPlaying = true;
+
+            await new Promise((resolve, reject) => {
+                audio.onended = () => {
+                    URL.revokeObjectURL(url);
+                    isPlaying = false;
+                    currentAudioElement = null;
+                    resolve();
+                };
+                audio.onerror = (e) => {
+                    console.error('Audio playback error (fallback):', e);
+                    URL.revokeObjectURL(url);
+                    isPlaying = false;
+                    currentAudioElement = null;
+                    reject(e);
+                };
+                audio.play().catch(reject);
+            });
         }
     } else {
         // Non-streaming response - use blob directly
@@ -361,8 +386,8 @@ playButton.addEventListener('click', async () => {
         const responseFormat = formatSelect.value;
         const speed = parseFloat(speedInput.value);
 
-        // iOS Safari doesn't support MediaSource well — use init/stream approach
-        if (isIOSSafari()) {
+        // Safari doesn't support MediaSource well — use init/stream approach
+        if (isAppleSafari()) {
             const initResponse = await fetch('/v1/audio/speech/init', {
                 method: 'POST',
                 headers: {

@@ -7,6 +7,7 @@ import os
 import traceback
 import json
 import base64
+import re
 from datetime import datetime, timedelta
 
 from config import DEFAULT_CONFIGS, VERSION
@@ -172,6 +173,28 @@ def stream_speech(stream_id):
         _active_streams.pop(stream_id, None)
         return jsonify({'error': 'Stream expired'}), 410
 
+    # This breaks things
+    # Special-case Range probes (Safari sometimes issues a quick Range GET
+    # like "Range: bytes=0-1" to probe a stream). Respond with 206 Partial
+    # Content and a tiny single-byte body so the browser treats the endpoint
+    # as range-capable while leaving the active stream intact.
+    # range_header = request.headers.get('Range')
+    # if range_header:
+    #     probe_headers = {
+    #         'Content-Type': 'audio/mpeg',
+    #         'Accept-Ranges': 'bytes',
+    #         'Content-Range': 'bytes 0-0/1',
+    #         'Content-Length': '1',
+    #         'Access-Control-Allow-Origin': request.headers.get('Origin', '*')
+    #     }
+    #     # Return a one-byte placeholder body (not real audio) so the probe
+    #     # succeeds; the actual streaming GET will follow and deliver audio.
+    #     return Response(b"\x00", status=206, headers=probe_headers)
+
+    # Get the correct MIME type based on response_format
+    response_format = params.get('response_format', DEFAULT_RESPONSE_FORMAT)
+    mime_type = AUDIO_FORMAT_MIME_TYPES.get(response_format, "audio/mpeg")
+
     # Special-case iOS Safari metadata probe (Icy-Metadata header).
     # Safari issues a separate GET with `Icy-Metadata: 1` to probe the stream.
     # Respond with 200 and an ICY header without consuming/deleting the stream.
@@ -180,13 +203,58 @@ def stream_speech(stream_id):
             '',
             status=200,
             headers={
-                'Content-Type': 'audio/mpeg',
+                'Content-Type': mime_type,
                 'Cache-Control': 'no-cache',
                 'Accept-Ranges': 'bytes',
                 'Icy-MetaInt': '0',
                 'Access-Control-Allow-Origin': request.headers.get('Origin', '*')
             }
         )
+
+    # Handle Range requests (Safari probes with Range: bytes=0-1)
+    range_header = request.headers.get('Range')
+    if range_header:
+        # Parse range header (e.g., "bytes=0-1")
+        range_match = re.match(r'bytes=(\d+)-(\d*)', range_header)
+        if range_match:
+            start = int(range_match.group(1))
+            end_str = range_match.group(2)
+
+            # For small range probes (like bytes=0-1), get first chunk and return partial content
+            # This allows Safari to verify range support before requesting full stream
+            if end_str and int(end_str) - start < 100:  # Small probe range
+                try:
+                    # Get first chunk from stream
+                    stream_gen = generate_raw_audio_stream(params['input'], params['voice'], params['speed'])
+                    first_chunk = next(stream_gen, None)
+
+                    if first_chunk and len(first_chunk) > start:
+                        # Return requested byte range from first chunk
+                        end = min(int(end_str), len(first_chunk) - 1) if end_str else len(first_chunk) - 1
+                        range_bytes = first_chunk[start:end + 1]
+                        range_length = len(range_bytes)
+
+                        # Estimate total size for Content-Range header (Safari needs this)
+                        # We use a large estimate since we don't know the actual total for streaming
+                        # Typical audio: ~100KB per minute, so estimate based on text length
+                        estimated_total = max(100000, len(params['input']) * 100)  # Conservative estimate
+
+                        return Response(
+                            range_bytes,
+                            status=206,
+                            headers={
+                                'Content-Type': mime_type,
+                                'Content-Range': f'bytes {start}-{start + range_length - 1}/{estimated_total}',
+                                'Content-Length': str(range_length),
+                                'Accept-Ranges': 'bytes',
+                                'Cache-Control': 'no-cache',
+                                'Access-Control-Allow-Origin': '*'
+                            }
+                        )
+                except Exception as e:
+                    # If range handling fails, fall through to normal streaming
+                    if DEBUG_STREAMING:
+                        print(f"[DEBUG_STREAMING] Range request handling failed: {e}")
 
     def generate_and_cleanup():
         # Stream audio to the client. Do NOT remove the _active_streams entry here:
@@ -196,14 +264,18 @@ def stream_speech(stream_id):
         for chunk in generate_raw_audio_stream(params['input'], params['voice'], params['speed']):
             yield chunk
 
+    # Build response headers for the streaming response
+    response_headers = {
+        'Cache-Control': 'no-cache',
+        'Accept-Ranges': 'bytes',
+        'Connection': 'keep-alive',
+        'Access-Control-Allow-Origin': '*'
+    }
+
     return Response(
         generate_and_cleanup(),
-        mimetype='audio/mpeg',
-        headers={
-            'Cache-Control': 'no-cache',
-            'Accept-Ranges': 'bytes',
-            'Access-Control-Allow-Origin': '*'
-        }
+        mimetype=mime_type,
+        headers=response_headers
     )
 
 # OpenAI endpoint format

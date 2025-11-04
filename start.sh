@@ -13,9 +13,10 @@ export DEBUG_STREAMING=True
 export DETAILED_ERROR_LOGGING=True
 export PORT=7777
 
-# Optional: Set Flask debug mode via environment (will be handled in server.py)
-export FLASK_DEBUG=1
-export FLASK_ENV=development
+# Optional: Run in production-style mode to use gevent WSGI server for proper chunked streaming
+# Set FLASK_DEBUG=0 so server.py uses gevent WSGIServer instead of Flask dev server
+export FLASK_DEBUG=0
+export FLASK_ENV=production
 
 # Print configuration
 echo "=========================================="
