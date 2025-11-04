@@ -11,6 +11,7 @@ import re
 from datetime import datetime, timedelta
 import logging
 import sys
+from urllib.parse import parse_qsl, urlencode
 
 from config import DEFAULT_CONFIGS, VERSION
 from handle_text import prepare_tts_input_with_context
@@ -39,7 +40,14 @@ def log_request_info():
         method = request.method
         # Full path including query string if present
         query = request.query_string.decode('utf-8') if request.query_string else ''
-        full_url = f"{request.path}{('?'+query) if query else ''}"
+        # Redact token from query string when building the logged URL
+        if query:
+            parsed_qs = parse_qsl(query, keep_blank_values=True)
+            redacted_qs = [(k, ('<REDACTED>' if k.lower() == 'token' else v)) for k, v in parsed_qs]
+            safe_query = urlencode(redacted_qs, doseq=True)
+            safe_full_url = f"{request.path}{('?'+safe_query) if safe_query else ''}"
+        else:
+            safe_full_url = request.path
 
         # Start with query params (GET)
         raw_query_params = request.args.to_dict(flat=False)
@@ -67,8 +75,13 @@ def log_request_info():
         merged_params = dict(query_params)
         merged_params.update(body_params)
 
+        # Redact sensitive param keys in merged params before logging
+        for sensitive_key in ('token', 'access_token', 'authorization', 'api_key', 'apikey'):
+            if sensitive_key in merged_params:
+                merged_params[sensitive_key] = '<REDACTED>'
+
         remote = request.remote_addr
-        app.logger.info("HTTP %s %s params=%s remote=%s", method, full_url, merged_params, remote)
+        app.logger.info("HTTP %s %s params=%s remote=%s", method, safe_full_url, merged_params, remote)
     except Exception:
         app.logger.exception("Failed to log incoming request")
 
