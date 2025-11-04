@@ -229,6 +229,13 @@ If you want to run the Python tests locally, install the test-only dependencies:
 pip install -r requirements-test.txt
 ```
 
+Note: For local transcription (the test suite uses Whisper) and for some audio format
+conversions, `ffmpeg` must be installed and available on your PATH. Verify by running:
+
+```bash
+ffmpeg -version
+```
+
 Note: The Docker image installs only `requirements.txt` to keep the runtime image minimal; test-only packages are excluded from the image.
 
 ### 4. Configure Environment Variables

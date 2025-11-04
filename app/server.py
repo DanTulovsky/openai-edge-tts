@@ -9,6 +9,8 @@ import json
 import base64
 import re
 from datetime import datetime, timedelta
+import logging
+import sys
 
 from config import DEFAULT_CONFIGS, VERSION
 from handle_text import prepare_tts_input_with_context
@@ -18,6 +20,58 @@ import uuid
 
 app = Flask(__name__)
 load_dotenv()
+
+# Configure stdout logging for incoming HTTP requests
+handler = logging.StreamHandler(sys.stdout)
+handler.setLevel(logging.INFO)
+formatter = logging.Formatter('%(asctime)s %(levelname)s %(name)s: %(message)s')
+handler.setFormatter(formatter)
+# Replace existing handlers so logs are predictable in containers/tests
+app.logger.handlers = []
+app.logger.propagate = False
+app.logger.setLevel(logging.INFO)
+app.logger.addHandler(handler)
+
+
+@app.before_request
+def log_request_info():
+    try:
+        method = request.method
+        # Full path including query string if present
+        query = request.query_string.decode('utf-8') if request.query_string else ''
+        full_url = f"{request.path}{('?'+query) if query else ''}"
+
+        # Start with query params (GET)
+        raw_query_params = request.args.to_dict(flat=False)
+        # Simplify single-value lists to scalars for readability
+        query_params = {k: v[0] if isinstance(v, list) and len(v) == 1 else v for k, v in raw_query_params.items()}
+
+        # Inspect JSON body for POST/PUT/PATCH and extract relevant fields
+        body = request.get_json(silent=True)
+        body_params = {}
+        if isinstance(body, dict):
+            if 'model' in body:
+                body_params['model'] = body.get('model')
+            if 'response_format' in body:
+                body_params['response_format'] = body.get('response_format')
+            if 'speed' in body:
+                body_params['speed'] = body.get('speed')
+            if 'voice' in body:
+                body_params['voice'] = body.get('voice')
+            # Support both 'input' (OpenAI style) and 'text' (other endpoints)
+            input_text = body.get('input') if 'input' in body else body.get('text') if 'text' in body else None
+            if isinstance(input_text, str):
+                body_params['input_length'] = len(input_text)
+
+        # Merge query params and body params (body overrides)
+        merged_params = dict(query_params)
+        merged_params.update(body_params)
+
+        remote = request.remote_addr
+        app.logger.info("HTTP %s %s params=%s remote=%s", method, full_url, merged_params, remote)
+    except Exception:
+        app.logger.exception("Failed to log incoming request")
+
 
 API_KEY = os.getenv('API_KEY', DEFAULT_CONFIGS["API_KEY"])
 PORT = int(os.getenv('PORT', str(DEFAULT_CONFIGS["PORT"])))
