@@ -211,8 +211,9 @@ def test_e2e_tts_whisper_local():
                 progress(f"saved streamed audio to {audio_path} ({total_bytes} bytes)")
 
                 # Transcribe using whisper
-                progress("loading whisper model 'small' (may take a while)...")
-                model = whisper.load_model("small")
+                whisper_model_name = os.getenv("WHISPER_MODEL", "medium")
+                progress(f"loading whisper model '{whisper_model_name}' (may take a while)...")
+                model = whisper.load_model(whisper_model_name)
                 progress("transcribing audio with whisper...")
                 result = model.transcribe(audio_path)
                 transcribed = result.get("text", "")
