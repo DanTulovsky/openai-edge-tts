@@ -260,3 +260,56 @@ def test_e2e_tts_whisper_local(input_text):
         if stdout:
             print("--- server stdout ---")
             print(stdout)
+
+
+def test_safari_range_probe_short_tts():
+    """Ensure the server responds to Safari-style Range probes with an accurate total for short TTS clips."""
+    port = get_free_port()
+
+    env = os.environ.copy()
+    env["PORT"] = str(port)
+    env["REQUIRE_API_KEY"] = "false"
+
+    progress(f"starting server on port {port} for Range-probe test")
+    proc = subprocess.Popen([sys.executable, "-u", "app/server.py"], env=env, stdout=None, stderr=None)
+    try:
+        assert wait_for_server(port, timeout=15.0), "Server did not start in time"
+
+        init_url = f"http://127.0.0.1:{port}/v1/audio/speech/init"
+        payload = {"input": "aprile in Italia", "response_format": "mp3"}
+        headers = {"Content-Type": "application/json"}
+        r = requests.post(init_url, json=payload, headers=headers, timeout=15.0)
+        r.raise_for_status()
+        data = r.json()
+        assert "stream_id" in data and "token" in data, f"unexpected init response: {data}"
+
+        stream_id = data["stream_id"]
+        token = data["token"]
+        stream_url = f"http://127.0.0.1:{port}/v1/audio/speech/stream/{stream_id}?token={token}"
+
+        # Send Safari-like small range probe
+        probe_headers = {"Range": "bytes=0-1"}
+        probe = requests.get(stream_url, headers=probe_headers, timeout=15.0)
+        # Server should return 206 Partial Content with Content-Range containing the actual total
+        assert probe.status_code == 206, f"Expected 206 from probe, got {probe.status_code}"
+        cr = probe.headers.get("Content-Range")
+        assert cr and cr.startswith("bytes 0-1/"), f"Unexpected Content-Range header: {cr}"
+        # Content-Length should match the returned body length
+        cl = probe.headers.get("Content-Length")
+        assert cl is not None and int(cl) == len(probe.content), "Content-Length header mismatch"
+
+        # Now request the full stream and ensure we can download it
+        with requests.get(stream_url, stream=True, timeout=60.0) as full_resp:
+            full_resp.raise_for_status()
+            total = 0
+            for chunk in full_resp.iter_content(chunk_size=4096):
+                if chunk:
+                    total += len(chunk)
+            assert total >= int(cr.split("/")[-1]), f"Full stream size {total} smaller than advertised total {cr}"
+
+    finally:
+        try:
+            proc.terminate()
+            proc.wait(timeout=5)
+        except Exception:
+            proc.kill()

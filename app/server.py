@@ -301,23 +301,62 @@ def stream_speech(stream_id):
                         range_bytes = first_chunk[start:end + 1]
                         range_length = len(range_bytes)
 
-                        # Estimate total size for Content-Range header (Safari needs this)
-                        # We use a large estimate since we don't know the actual total for streaming
-                        # Typical audio: ~100KB per minute, so estimate based on text length
-                        estimated_total = max(100000, len(params['input']) * 100)  # Conservative estimate
+                        # Attempt to generate the full audio file synchronously for short clips
+                        # so we can return an accurate total size in Content-Range. This fixes
+                        # Safari probes that otherwise receive a large bogus total and wait.
+                        try:
+                            if DEBUG_STREAMING:
+                                print(f"[DEBUG_STREAMING] Range probe detected - generating full audio file for accurate Content-Range (text_length={len(params.get('input',''))})")
 
-                        return Response(
-                            range_bytes,
-                            status=206,
-                            headers={
+                            # Use the same response_format as the stream so the MIME and file match
+                            rf = params.get('response_format', DEFAULT_RESPONSE_FORMAT)
+                            full_path = generate_speech(params.get('input'), params.get('voice'), rf, params.get('speed', DEFAULT_SPEED))
+
+                            try:
+                                with open(full_path, 'rb') as f:
+                                    full_bytes = f.read()
+                            finally:
+                                # Best-effort cleanup of the temporary file
+                                try:
+                                    os.unlink(full_path)
+                                except Exception:
+                                    pass
+
+                            actual_total = len(full_bytes)
+                            # Calculate the slice requested by the probe
+                            end = min(int(end_str), actual_total - 1) if end_str else actual_total - 1
+                            if start > end:
+                                # Invalid range, fall through to a safe one-byte probe below
+                                raise ValueError("Invalid byte range for generated audio")
+                            range_bytes = full_bytes[start:end + 1]
+                            range_length = len(range_bytes)
+
+                            return Response(
+                                range_bytes,
+                                status=206,
+                                headers={
+                                    'Content-Type': mime_type,
+                                    'Content-Range': f'bytes {start}-{start + range_length - 1}/{actual_total}',
+                                    'Content-Length': str(range_length),
+                                    'Accept-Ranges': 'bytes',
+                                    'Cache-Control': 'no-cache',
+                                    'Access-Control-Allow-Origin': '*'
+                                }
+                            )
+                        except Exception as e:
+                            # If synchronous generation fails for any reason, fall back to a
+                            # tiny single-byte probe so the browser treats the endpoint as range-capable.
+                            if DEBUG_STREAMING:
+                                print(f"[DEBUG_STREAMING] Range probe full-file generation failed: {e}")
+                            probe_headers = {
                                 'Content-Type': mime_type,
-                                'Content-Range': f'bytes {start}-{start + range_length - 1}/{estimated_total}',
-                                'Content-Length': str(range_length),
                                 'Accept-Ranges': 'bytes',
+                                'Content-Range': 'bytes 0-0/1',
+                                'Content-Length': '1',
                                 'Cache-Control': 'no-cache',
-                                'Access-Control-Allow-Origin': '*'
+                                'Access-Control-Allow-Origin': request.headers.get('Origin', '*')
                             }
-                        )
+                            return Response(b"\x00", status=206, headers=probe_headers)
                 except Exception as e:
                     # If range handling fails, fall through to normal streaming
                     if DEBUG_STREAMING:
