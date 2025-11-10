@@ -156,7 +156,17 @@ def side_by_side_diff(original: str, transcribed: str):
 
 
 @pytest.mark.slow
-def test_e2e_tts_whisper_local():
+@pytest.mark.parametrize("input_text", [
+    "Hello",
+    "The quick brown fox jumps over the lazy dog.",
+    "This is a paragraph. It has multiple sentences to exercise TTS and transcription quality.",
+    (
+        "This is an end-to-end TTS test. The quick brown fox jumps over the lazy dog. "
+        "We repeat the sentence many times to generate a large input for TTS generation."
+    ) * 10,
+])
+@pytest.mark.slow
+def test_e2e_tts_whisper_local(input_text):
     if whisper is None:
         pytest.skip("whisper package not installed")
 
@@ -176,16 +186,9 @@ def test_e2e_tts_whisper_local():
         assert wait_for_server(port, timeout=15.0), "Server did not start in time"
         progress("server is reachable")
 
-        # Build a large text payload
-        base = (
-            "This is an end-to-end TTS test. The quick brown fox jumps over the lazy dog. "
-            "We repeat the sentence many times to generate a large input for TTS generation. "
-        )
-        large_text = base * 10  # make it large
-
         url = f"http://127.0.0.1:{port}/v1/audio/speech"
         headers = {"Content-Type": "application/json"}
-        payload = {"input": large_text, "stream_format": "audio_stream"}
+        payload = {"input": input_text, "stream_format": "audio_stream"}
 
         progress(f"sending TTS request to {url} (streaming)")
         with requests.post(url, json=payload, headers=headers, stream=True, timeout=120) as resp:
@@ -220,7 +223,7 @@ def test_e2e_tts_whisper_local():
                 progress("transcription completed")
 
                 # Normalize and compare
-                norm_orig = normalize_text(large_text)
+                norm_orig = normalize_text(input_text)
                 norm_trans = normalize_text(transcribed)
 
                 ratio = difflib.SequenceMatcher(None, norm_orig, norm_trans).ratio()
@@ -230,8 +233,9 @@ def test_e2e_tts_whisper_local():
                 side_by_side_diff(norm_orig, norm_trans)
                 progress(f"similarity ratio={ratio:.3f}")
 
-                # Assert transcription reasonably matches (allow some errors)
-                assert ratio >= 0.60, f"Transcription similarity too low: {ratio:.2f}"
+                # Dynamic threshold for very short inputs
+                threshold = 0.40 if len(input_text.split()) <= 3 else 0.60
+                assert ratio >= threshold, f"Transcription similarity too low: {ratio:.2f} (threshold {threshold})"
 
             finally:
                 # cleanup audio file
