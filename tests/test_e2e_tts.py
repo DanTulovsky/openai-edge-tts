@@ -22,6 +22,7 @@ try:
     from rich.text import Text
 except Exception:
     Console = None
+import _test_helpers as _helpers
 
 try:
     from diff_match_patch import diff_match_patch
@@ -71,7 +72,13 @@ def side_by_side_diff(original: str, transcribed: str):
     Prefer `diff-match-patch` semantic cleanup when available and fall back
     to a word-level SequenceMatcher if not.
     """
-    console = Console() if Console else None
+    # Record the last diff so pytest plugin can print it on test failure.
+    try:
+        _helpers.set_last_diff(original, transcribed)
+    except Exception:
+        pass
+    # Use the real terminal stdout to bypass pytest capture so diffs are visible on failure.
+    console = Console(file=sys.__stdout__) if Console else None
 
     if diff_match_patch is not None:
         dmp = diff_match_patch()
@@ -121,7 +128,10 @@ def side_by_side_diff(original: str, transcribed: str):
         left_str = ''.join(p if not isinstance(p, tuple) else '' for p in left_parts)
         right_str = ''.join(p if not isinstance(p, tuple) else '' for p in right_parts)
         for line in difflib.unified_diff(left_str.splitlines(), right_str.splitlines(), lineterm=""):
-            print(line)
+            try:
+                sys.__stdout__.write(line + "\n")
+            except Exception:
+                print(line)
         return
 
     # Older fallback: word-level diff using SequenceMatcher (less human-friendly)
@@ -152,7 +162,10 @@ def side_by_side_diff(original: str, transcribed: str):
         console.print(table)
     else:
         for line in difflib.unified_diff(original.splitlines(), transcribed.splitlines(), lineterm=""):
-            print(line)
+            try:
+                sys.__stdout__.write(line + "\n")
+            except Exception:
+                print(line)
 
 
 @pytest.mark.slow
