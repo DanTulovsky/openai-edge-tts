@@ -11,6 +11,10 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
 COPY requirements.txt /tmp/
 RUN --mount=type=cache,target=/root/.cache/pip \
     pip install -r /tmp/requirements.txt
+RUN --mount=type=cache,target=/root/.cache/pip \
+    pip install opentelemetry-distro opentelemetry-exporter-otlp
+RUN --mount=type=cache,target=/root/.cache/pip \
+    opentelemetry-bootstrap -a install
 
 # Final stage using the base with ffmpeg
 FROM python-ffmpeg-base

@@ -1,4 +1,6 @@
 # server.py
+from opentelemetry.instrumentation.auto_instrumentation import initialize
+initialize()
 
 from flask import Flask, request, send_file, jsonify, Response, make_response, render_template
 from gevent.pywsgi import WSGIServer
