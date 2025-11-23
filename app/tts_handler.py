@@ -70,7 +70,10 @@ async def _generate_audio_stream(text, voice, speed):
         comm_create_start = datetime.now()
         print(f"[DEBUG_STREAMING] _generate_audio_stream: Creating communicator - timestamp={comm_create_start}")
 
-    communicator = edge_tts.Communicate(text=text, voice=edge_tts_voice, rate=speed_rate)
+    # Force a fresh aiohttp connector to prevent connection pooling issues
+    # that can cause edge-tts to reuse connections with stale state
+    connector = aiohttp.TCPConnector(force_close=True)
+    communicator = edge_tts.Communicate(text=text, voice=edge_tts_voice, rate=speed_rate, connector=connector)
 
     if DEBUG_STREAMING:
         comm_create_end = datetime.now()
@@ -224,8 +227,12 @@ async def _generate_audio(text, voice, response_format, speed):
     # DEBUG: Log the exact parameters being sent to edge-tts
     print(f"[TTS_DEBUG] Creating Communicate with: text='{text[:50]}...', voice='{edge_tts_voice}', rate='{speed_rate}'")
 
+    # Force a fresh aiohttp connector to prevent connection pooling issues
+    # that can cause edge-tts to reuse connections with stale state
+    connector = aiohttp.TCPConnector(force_close=True)
+
     # Generate the MP3 file
-    communicator = edge_tts.Communicate(text=text, voice=edge_tts_voice, rate=speed_rate)
+    communicator = edge_tts.Communicate(text=text, voice=edge_tts_voice, rate=speed_rate, connector=connector)
     await communicator.save(temp_mp3_path)
 
     print(f"[TTS_DEBUG] Saved audio to {temp_mp3_path}, size={os.path.getsize(temp_mp3_path)} bytes")
