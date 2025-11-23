@@ -1,34 +1,33 @@
 # server.py
+import uuid
+from utils import getenv_bool, require_api_key, AUDIO_FORMAT_MIME_TYPES, DETAILED_ERROR_LOGGING, DEBUG_STREAMING
+from tts_handler import generate_speech, generate_speech_stream, get_models_formatted, get_voices, get_voices_formatted, is_ffmpeg_installed
+from handle_text import prepare_tts_input_with_context
+from config import DEFAULT_CONFIGS, VERSION
+from urllib.parse import parse_qsl, urlencode
+import sys
+import logging
+from datetime import datetime, timedelta
+import re
+import base64
+import json
+import traceback
+import os
+from dotenv import load_dotenv
+from gevent.pywsgi import WSGIServer
+from flask import Flask, request, send_file, jsonify, Response, make_response, render_template
+from opentelemetry.trace.propagation.tracecontext import TraceContextTextMapPropagator
+from opentelemetry.propagate import set_global_textmap
 from opentelemetry.instrumentation.auto_instrumentation import initialize
 initialize()
 
 # Configure trace context propagation explicitly to ensure parent-child span relationships
-from opentelemetry.propagate import set_global_textmap
-from opentelemetry.trace.propagation.tracecontext import TraceContextTextMapPropagator
 
 # Set up W3C Trace Context propagator (standard)
 # This ensures incoming trace context headers (traceparent, tracestate) are properly
 # extracted and linked, creating proper parent-child span relationships
 set_global_textmap(TraceContextTextMapPropagator())
 
-from flask import Flask, request, send_file, jsonify, Response, make_response, render_template
-from gevent.pywsgi import WSGIServer
-from dotenv import load_dotenv
-import os
-import traceback
-import json
-import base64
-import re
-from datetime import datetime, timedelta
-import logging
-import sys
-from urllib.parse import parse_qsl, urlencode
-
-from config import DEFAULT_CONFIGS, VERSION
-from handle_text import prepare_tts_input_with_context
-from tts_handler import generate_speech, generate_speech_stream, get_models_formatted, get_voices, get_voices_formatted, is_ffmpeg_installed
-from utils import getenv_bool, require_api_key, AUDIO_FORMAT_MIME_TYPES, DETAILED_ERROR_LOGGING, DEBUG_STREAMING
-import uuid
 
 app = Flask(__name__)
 load_dotenv()
@@ -317,7 +316,7 @@ def stream_speech(stream_id):
                         # Safari probes that otherwise receive a large bogus total and wait.
                         try:
                             if DEBUG_STREAMING:
-                                print(f"[DEBUG_STREAMING] Range probe detected - generating full audio file for accurate Content-Range (text_length={len(params.get('input',''))})")
+                                print(f"[DEBUG_STREAMING] Range probe detected - generating full audio file for accurate Content-Range (text_length={len(params.get('input', ''))})")
 
                             # Use the same response_format as the stream so the MIME and file match
                             rf = params.get('response_format', DEFAULT_RESPONSE_FORMAT)
