@@ -46,6 +46,26 @@ def is_ffmpeg_installed():
         return False
 
 
+def extract_language_from_voice(voice_name):
+    """Extract language code from voice name (e.g., 'it-IT' from 'it-IT-GiuseppeMultilingualNeural')."""
+    # Voice names start with language code like "en-US", "it-IT", "fr-FR", etc.
+    parts = voice_name.split('-')
+    if len(parts) >= 2:
+        return f"{parts[0]}-{parts[1]}"  # Return "it-IT", "en-US", etc.
+    return "en-US"  # Fallback to English
+
+
+def wrap_text_with_language_ssml(text, voice_name):
+    """Wrap text in SSML with proper xml:lang attribute to ensure correct language interpretation."""
+    from xml.sax.saxutils import escape
+    
+    lang_code = extract_language_from_voice(voice_name)
+    # Escape the text to handle special characters
+    escaped_text = escape(text)
+    # Return SSML with correct language attribute
+    return f"<speak version='1.0' xmlns='http://www.w3.org/2001/10/synthesis' xml:lang='{lang_code}'>{escaped_text}</speak>"
+
+
 async def _generate_audio_stream(text, voice, speed):
     """Generate streaming TTS audio using edge-tts."""
     if DEBUG_STREAMING:
@@ -62,8 +82,13 @@ async def _generate_audio_stream(text, voice, speed):
         print(f"Error converting speed: {e}. Defaulting to +0%.")
         speed_rate = "+0%"
 
+    # Wrap text in SSML with correct language attribute to fix multilingual voice issues
+    # edge-tts has xml:lang='en-US' hardcoded, causing multilingual voices to misinterpret text
+    lang_code = extract_language_from_voice(edge_tts_voice)
+    ssml_text = wrap_text_with_language_ssml(text, edge_tts_voice)
+
     # DEBUG: Log the exact parameters being sent to edge-tts
-    print(f"[TTS_DEBUG] Stream: Creating Communicate with: text='{text[:50]}...', voice='{edge_tts_voice}', rate='{speed_rate}'")
+    print(f"[TTS_DEBUG] Stream: Creating Communicate with: text='{text[:50]}...', voice='{edge_tts_voice}', lang='{lang_code}', rate='{speed_rate}'")
 
     # Create the communicator for streaming
     if DEBUG_STREAMING:
@@ -73,7 +98,7 @@ async def _generate_audio_stream(text, voice, speed):
     # Force a fresh aiohttp connector to prevent connection pooling issues
     # that can cause edge-tts to reuse connections with stale state
     connector = aiohttp.TCPConnector(force_close=True)
-    communicator = edge_tts.Communicate(text=text, voice=edge_tts_voice, rate=speed_rate, connector=connector)
+    communicator = edge_tts.Communicate(text=ssml_text, voice=edge_tts_voice, rate=speed_rate, connector=connector)
 
     if DEBUG_STREAMING:
         comm_create_end = datetime.now()
@@ -224,17 +249,22 @@ async def _generate_audio(text, voice, response_format, speed):
         print(f"Error converting speed: {e}. Defaulting to +0%.")
         speed_rate = "+0%"
 
+    # Wrap text in SSML with correct language attribute to fix multilingual voice issues
+    # edge-tts has xml:lang='en-US' hardcoded, causing multilingual voices to misinterpret text
+    lang_code = extract_language_from_voice(edge_tts_voice)
+    ssml_text = wrap_text_with_language_ssml(text, edge_tts_voice)
+
     # DEBUG: Log the exact parameters being sent to edge-tts
-    print(f"[TTS_DEBUG] Creating Communicate with: text='{text[:50]}...', voice='{edge_tts_voice}', rate='{speed_rate}'")
+    print(f"[TTS_DEBUG] Creating Communicate with: text='{text[:50]}...', voice='{edge_tts_voice}', lang='{lang_code}', rate='{speed_rate}'")
 
     # Force a fresh aiohttp connector to prevent connection pooling issues
     # that can cause edge-tts to reuse connections with stale state
     connector = aiohttp.TCPConnector(force_close=True)
-
+    
     # Generate the MP3 file
-    communicator = edge_tts.Communicate(text=text, voice=edge_tts_voice, rate=speed_rate, connector=connector)
+    communicator = edge_tts.Communicate(text=ssml_text, voice=edge_tts_voice, rate=speed_rate, connector=connector)
     await communicator.save(temp_mp3_path)
-
+    
     print(f"[TTS_DEBUG] Saved audio to {temp_mp3_path}, size={os.path.getsize(temp_mp3_path)} bytes")
     temp_mp3_file_obj.close()  # Explicitly close our file object for the initial mp3
 
