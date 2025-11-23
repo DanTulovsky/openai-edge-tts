@@ -2,6 +2,15 @@
 from opentelemetry.instrumentation.auto_instrumentation import initialize
 initialize()
 
+# Configure trace context propagation explicitly to ensure parent-child span relationships
+from opentelemetry.propagate import set_global_textmap
+from opentelemetry.trace.propagation.tracecontext import TraceContextTextMapPropagator
+
+# Set up W3C Trace Context propagator (standard)
+# This ensures incoming trace context headers (traceparent, tracestate) are properly
+# extracted and linked, creating proper parent-child span relationships
+set_global_textmap(TraceContextTextMapPropagator())
+
 from flask import Flask, request, send_file, jsonify, Response, make_response, render_template
 from gevent.pywsgi import WSGIServer
 from dotenv import load_dotenv
