@@ -21,11 +21,11 @@ from flask import Flask, request, send_file, jsonify, Response, make_response, r
 # Configure OpenTelemetry trace context propagation BEFORE auto-instrumentation
 # This ensures incoming trace context headers (traceparent, tracestate) are properly
 # extracted and linked, creating proper parent-child span relationships
-from opentelemetry.propagate import set_global_textmap
-from opentelemetry.trace.propagation.tracecontext import TraceContextTextMapPropagator
+# from opentelemetry.propagate import set_global_textmap
+# from opentelemetry.trace.propagation.tracecontext import TraceContextTextMapPropagator
 
 # Set up W3C Trace Context propagator (standard) - must be done before initialize()
-set_global_textmap(TraceContextTextMapPropagator())
+# set_global_textmap(TraceContextTextMapPropagator())
 
 # Now initialize auto-instrumentation with the propagator configured
 initialize()
