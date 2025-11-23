@@ -333,9 +333,14 @@ async def _get_voices(language=None):
     # List all voices, filter by language if specified
     all_voices = await edge_tts.list_voices()
     language = language or DEFAULT_LANGUAGE  # Use default if no language specified
+
+    # Filter by language and exclude multilingual voices
+    # Multilingual voices can auto-detect language which causes inconsistent behavior
     filtered_voices = [
         {"name": v['ShortName'], "gender": v['Gender'], "language": v['Locale']}
-        for v in all_voices if language == 'all' or language is None or v['Locale'] == language
+        for v in all_voices
+        if (language == 'all' or language is None or v['Locale'] == language)
+        and 'Multilingual' not in v['ShortName']  # Exclude multilingual voices
     ]
     return filtered_voices
 
