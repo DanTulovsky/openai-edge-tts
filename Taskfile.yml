@@ -1,0 +1,60 @@
+version: "3"
+
+tasks:
+  test:
+    desc: Run all tests
+    cmds:
+      - pytest tests/ -v --tb=short
+
+  test:italian:
+    desc: Run only Italian voice consistency tests
+    cmds:
+      - pytest tests/test_italian_voice_consistency.py -v
+
+  test:e2e:
+    desc: Run end-to-end TTS tests
+    cmds:
+      - pytest tests/test_e2e_tts.py -v
+
+  test:watch:
+    desc: Run tests in watch mode (requires pytest-watch)
+    cmds:
+      - pytest-watch tests/ -v
+
+  test:coverage:
+    desc: Run tests with coverage report
+    cmds:
+      - pytest tests/ -v --cov=app --cov-report=html --cov-report=term
+
+  install:
+    desc: Install dependencies
+    cmds:
+      - pip install -r requirements.txt
+      - pip install -r requirements-test.txt
+
+  install:dev:
+    desc: Install development dependencies
+    cmds:
+      - pip install -r requirements.txt
+      - pip install -r requirements-test.txt
+      - pip install pytest-watch pytest-cov
+
+  build-push:
+    desc: Build and push Docker image
+    cmds:
+      - ./build-multi-platform.sh --ffmpeg --push
+
+  run:
+    desc: Run the TTS server locally
+    cmds:
+      - python app/server.py
+
+  clean:
+    desc: Clean up generated files
+    cmds:
+      - rm -rf __pycache__ app/__pycache__ tests/__pycache__
+      - rm -rf .pytest_cache
+      - rm -rf htmlcov
+      - rm -rf .coverage
+      - find . -type f -name "*.pyc" -delete
+      - find . -type d -name "__pycache__" -delete

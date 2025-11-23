@@ -288,7 +288,19 @@ async def _generate_audio(text, voice, response_format, speed):
 
 
 def generate_speech(text, voice, response_format, speed=1.0):
-    return asyncio.run(_generate_audio(text, voice, response_format, speed))
+    # Create a fresh event loop for each request to prevent cross-request state contamination
+    # This is especially important when running under gevent WSGI server
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+    try:
+        return loop.run_until_complete(_generate_audio(text, voice, response_format, speed))
+    finally:
+        try:
+            loop.run_until_complete(loop.shutdown_asyncgens())
+        except Exception:
+            pass
+        asyncio.set_event_loop(None)
+        loop.close()
 
 
 def get_models():
@@ -315,7 +327,18 @@ async def _get_voices(language=None):
 
 
 def get_voices(language=None):
-    return asyncio.run(_get_voices(language))
+    # Create a fresh event loop for each request to prevent cross-request state contamination
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+    try:
+        return loop.run_until_complete(_get_voices(language))
+    finally:
+        try:
+            loop.run_until_complete(loop.shutdown_asyncgens())
+        except Exception:
+            pass
+        asyncio.set_event_loop(None)
+        loop.close()
 
 
 def speed_to_rate(speed: float) -> str:
