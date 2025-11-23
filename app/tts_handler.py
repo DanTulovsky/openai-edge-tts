@@ -128,22 +128,23 @@ def generate_speech_stream(text, voice, speed=1.0):
         start_time = datetime.now()
         print(f"[DEBUG_STREAMING] generate_speech_stream: Entry - text_length={len(text)}, timestamp={start_time}")
 
-    # Drive the async generator from a dedicated event loop and yield chunks synchronously
-    async_generator = _generate_audio_stream(text, voice, speed)
-
     if DEBUG_STREAMING:
         loop_create_start = datetime.now()
         print(f"[DEBUG_STREAMING] generate_speech_stream: Creating event loop - timestamp={loop_create_start}")
 
+    # Create and set the event loop FIRST, before creating the async generator
     loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
 
     if DEBUG_STREAMING:
         loop_create_end = datetime.now()
         loop_create_delta = (loop_create_end - loop_create_start).total_seconds()
-        print(f"[DEBUG_STREAMING] generate_speech_stream: Event loop created - took={loop_create_delta:.3f}s, timestamp={loop_create_end}")
+        print(f"[DEBUG_STREAMING] generate_speech_stream: Event loop created and set - took={loop_create_delta:.3f}s, timestamp={loop_create_end}")
+
+    # Now create the async generator WITHIN the proper event loop context
+    async_generator = _generate_audio_stream(text, voice, speed)
 
     try:
-        asyncio.set_event_loop(loop)
         chunk_count = 0
         last_chunk_time = None
 
