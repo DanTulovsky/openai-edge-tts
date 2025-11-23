@@ -1,6 +1,5 @@
 # tts_handler.py
 
-import edge_tts.communicate
 import edge_tts
 import asyncio
 import tempfile
@@ -9,7 +8,6 @@ import os
 from pathlib import Path
 from datetime import datetime
 import aiohttp
-from typing import Union
 
 from utils import DETAILED_ERROR_LOGGING, DEBUG_STREAMING
 from config import DEFAULT_CONFIGS
@@ -48,48 +46,6 @@ def is_ffmpeg_installed():
         return False
 
 
-def extract_language_from_voice(voice_name):
-    """Extract language code from voice name (e.g., 'it-IT' from 'it-IT-GiuseppeMultilingualNeural')."""
-    # Voice names start with language code like "en-US", "it-IT", "fr-FR", etc.
-    parts = voice_name.split('-')
-    if len(parts) >= 2:
-        return f"{parts[0]}-{parts[1]}"  # Return "it-IT", "en-US", etc.
-    return "en-US"  # Fallback to English
-
-
-# ==============================================================================
-# WORKAROUND for edge-tts hardcoded xml:lang='en-US'
-# ==============================================================================
-# edge-tts v7.0.2 has xml:lang='en-US' hardcoded in communicate.py line 269.
-# This causes multilingual voices to misinterpret text (e.g., Italian voice
-# speaking English). Until edge-tts adds a language parameter, we monkey-patch
-# the mkssml function to use the correct language from the voice name.
-#
-# TODO: Submit PR to edge-tts to add 'lang' parameter, then remove this patch
-# ==============================================================================
-
-def _mkssml_with_voice_lang(tc, escaped_text: Union[str, bytes]) -> str:
-    """Patched mkssml that extracts xml:lang from voice name instead of hardcoding 'en-US'."""
-    if isinstance(escaped_text, bytes):
-        escaped_text = escaped_text.decode("utf-8")
-
-    lang_code = extract_language_from_voice(tc.voice)
-
-    return (
-        f"<speak version='1.0' xmlns='http://www.w3.org/2001/10/synthesis' xml:lang='{lang_code}'>"
-        f"<voice name='{tc.voice}'>"
-        f"<prosody pitch='{tc.pitch}' rate='{tc.rate}' volume='{tc.volume}'>"
-        f"{escaped_text}"
-        "</prosody>"
-        "</voice>"
-        "</speak>"
-    )
-
-
-# Apply the patch
-edge_tts.communicate.mkssml = _mkssml_with_voice_lang
-
-
 async def _generate_audio_stream(text, voice, speed):
     """Generate streaming TTS audio using edge-tts."""
     if DEBUG_STREAMING:
@@ -106,11 +62,8 @@ async def _generate_audio_stream(text, voice, speed):
         print(f"Error converting speed: {e}. Defaulting to +0%.")
         speed_rate = "+0%"
 
-    # Extract language from voice for debugging
-    lang_code = extract_language_from_voice(edge_tts_voice)
-
     # DEBUG: Log the exact parameters being sent to edge-tts
-    print(f"[TTS_DEBUG] Stream: Creating Communicate with: text='{text[:50]}...', voice='{edge_tts_voice}', lang='{lang_code}', rate='{speed_rate}'")
+    print(f"[TTS_DEBUG] Stream: Creating Communicate with: text='{text[:50]}...', voice='{edge_tts_voice}', rate='{speed_rate}'")
 
     # Create the communicator for streaming
     if DEBUG_STREAMING:
@@ -119,7 +72,6 @@ async def _generate_audio_stream(text, voice, speed):
 
     # Force a fresh aiohttp connector to prevent connection pooling issues
     connector = aiohttp.TCPConnector(force_close=True)
-    # mkssml is patched at module level to use correct xml:lang from voice name
     communicator = edge_tts.Communicate(text=text, voice=edge_tts_voice, rate=speed_rate, connector=connector)
 
     if DEBUG_STREAMING:
@@ -271,17 +223,13 @@ async def _generate_audio(text, voice, response_format, speed):
         print(f"Error converting speed: {e}. Defaulting to +0%.")
         speed_rate = "+0%"
 
-    # Extract language from voice for debugging
-    lang_code = extract_language_from_voice(edge_tts_voice)
-
     # DEBUG: Log the exact parameters being sent to edge-tts
-    print(f"[TTS_DEBUG] Creating Communicate with: text='{text[:50]}...', voice='{edge_tts_voice}', lang='{lang_code}', rate='{speed_rate}'")
+    print(f"[TTS_DEBUG] Creating Communicate with: text='{text[:50]}...', voice='{edge_tts_voice}', rate='{speed_rate}'")
 
     # Force a fresh aiohttp connector to prevent connection pooling issues
     connector = aiohttp.TCPConnector(force_close=True)
 
     # Generate the MP3 file
-    # mkssml is patched at module level to use correct xml:lang from voice name
     communicator = edge_tts.Communicate(text=text, voice=edge_tts_voice, rate=speed_rate, connector=connector)
     await communicator.save(temp_mp3_path)
 
