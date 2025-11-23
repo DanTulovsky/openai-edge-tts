@@ -7,6 +7,7 @@ import subprocess
 import os
 from pathlib import Path
 from datetime import datetime
+import aiohttp
 
 from utils import DETAILED_ERROR_LOGGING, DEBUG_STREAMING
 from config import DEFAULT_CONFIGS
@@ -226,7 +227,7 @@ async def _generate_audio(text, voice, response_format, speed):
     # Generate the MP3 file
     communicator = edge_tts.Communicate(text=text, voice=edge_tts_voice, rate=speed_rate)
     await communicator.save(temp_mp3_path)
-    
+
     print(f"[TTS_DEBUG] Saved audio to {temp_mp3_path}, size={os.path.getsize(temp_mp3_path)} bytes")
     temp_mp3_file_obj.close()  # Explicitly close our file object for the initial mp3
 
