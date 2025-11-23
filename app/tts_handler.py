@@ -61,6 +61,9 @@ async def _generate_audio_stream(text, voice, speed):
         print(f"Error converting speed: {e}. Defaulting to +0%.")
         speed_rate = "+0%"
 
+    # DEBUG: Log the exact parameters being sent to edge-tts
+    print(f"[TTS_DEBUG] Stream: Creating Communicate with: text='{text[:50]}...', voice='{edge_tts_voice}', rate='{speed_rate}'")
+
     # Create the communicator for streaming
     if DEBUG_STREAMING:
         comm_create_start = datetime.now()
@@ -217,9 +220,14 @@ async def _generate_audio(text, voice, response_format, speed):
         print(f"Error converting speed: {e}. Defaulting to +0%.")
         speed_rate = "+0%"
 
+    # DEBUG: Log the exact parameters being sent to edge-tts
+    print(f"[TTS_DEBUG] Creating Communicate with: text='{text[:50]}...', voice='{edge_tts_voice}', rate='{speed_rate}'")
+
     # Generate the MP3 file
     communicator = edge_tts.Communicate(text=text, voice=edge_tts_voice, rate=speed_rate)
     await communicator.save(temp_mp3_path)
+    
+    print(f"[TTS_DEBUG] Saved audio to {temp_mp3_path}, size={os.path.getsize(temp_mp3_path)} bytes")
     temp_mp3_file_obj.close()  # Explicitly close our file object for the initial mp3
 
     # If the requested format is mp3, return the generated file directly
