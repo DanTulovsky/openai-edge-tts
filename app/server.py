@@ -1,5 +1,17 @@
 # server.py
+# Configure OpenTelemetry trace context propagation BEFORE auto-instrumentation
+# This ensures incoming trace context headers (traceparent, tracestate) are properly
+# extracted and linked, creating proper parent-child span relationships
+from opentelemetry.propagate import set_global_textmap
+from opentelemetry.trace.propagation.tracecontext import TraceContextTextMapPropagator
+
+# Set up W3C Trace Context propagator (standard) - must be done before initialize()
+set_global_textmap(TraceContextTextMapPropagator())
+
 from opentelemetry.instrumentation.auto_instrumentation import initialize
+# Now initialize auto-instrumentation with the propagator configured
+initialize()
+
 import uuid
 from utils import getenv_bool, require_api_key, AUDIO_FORMAT_MIME_TYPES, DETAILED_ERROR_LOGGING, DEBUG_STREAMING
 from tts_handler import generate_speech, generate_speech_stream, get_models_formatted, get_voices, get_voices_formatted, is_ffmpeg_installed
@@ -18,17 +30,6 @@ from dotenv import load_dotenv
 from gevent.pywsgi import WSGIServer
 from flask import Flask, request, send_file, jsonify, Response, make_response, render_template
 
-# Configure OpenTelemetry trace context propagation BEFORE auto-instrumentation
-# This ensures incoming trace context headers (traceparent, tracestate) are properly
-# extracted and linked, creating proper parent-child span relationships
-# from opentelemetry.propagate import set_global_textmap
-# from opentelemetry.trace.propagation.tracecontext import TraceContextTextMapPropagator
-
-# Set up W3C Trace Context propagator (standard) - must be done before initialize()
-# set_global_textmap(TraceContextTextMapPropagator())
-
-# Now initialize auto-instrumentation with the propagator configured
-initialize()
 
 
 app = Flask(__name__)

@@ -1,5 +1,6 @@
 # tts_handler.py
 
+import edge_tts.communicate
 import edge_tts
 import asyncio
 import tempfile
@@ -8,6 +9,7 @@ import os
 from pathlib import Path
 from datetime import datetime
 import aiohttp
+from typing import Union
 
 from utils import DETAILED_ERROR_LOGGING, DEBUG_STREAMING
 from config import DEFAULT_CONFIGS
@@ -55,15 +57,37 @@ def extract_language_from_voice(voice_name):
     return "en-US"  # Fallback to English
 
 
-def wrap_text_with_language_ssml(text, voice_name):
-    """Wrap text in SSML with proper xml:lang attribute to ensure correct language interpretation."""
-    from xml.sax.saxutils import escape
-    
-    lang_code = extract_language_from_voice(voice_name)
-    # Escape the text to handle special characters
-    escaped_text = escape(text)
-    # Return SSML with correct language attribute
-    return f"<speak version='1.0' xmlns='http://www.w3.org/2001/10/synthesis' xml:lang='{lang_code}'>{escaped_text}</speak>"
+# ==============================================================================
+# WORKAROUND for edge-tts hardcoded xml:lang='en-US'
+# ==============================================================================
+# edge-tts v7.0.2 has xml:lang='en-US' hardcoded in communicate.py line 269.
+# This causes multilingual voices to misinterpret text (e.g., Italian voice
+# speaking English). Until edge-tts adds a language parameter, we monkey-patch
+# the mkssml function to use the correct language from the voice name.
+#
+# TODO: Submit PR to edge-tts to add 'lang' parameter, then remove this patch
+# ==============================================================================
+
+def _mkssml_with_voice_lang(tc, escaped_text: Union[str, bytes]) -> str:
+    """Patched mkssml that extracts xml:lang from voice name instead of hardcoding 'en-US'."""
+    if isinstance(escaped_text, bytes):
+        escaped_text = escaped_text.decode("utf-8")
+
+    lang_code = extract_language_from_voice(tc.voice)
+
+    return (
+        f"<speak version='1.0' xmlns='http://www.w3.org/2001/10/synthesis' xml:lang='{lang_code}'>"
+        f"<voice name='{tc.voice}'>"
+        f"<prosody pitch='{tc.pitch}' rate='{tc.rate}' volume='{tc.volume}'>"
+        f"{escaped_text}"
+        "</prosody>"
+        "</voice>"
+        "</speak>"
+    )
+
+
+# Apply the patch
+edge_tts.communicate.mkssml = _mkssml_with_voice_lang
 
 
 async def _generate_audio_stream(text, voice, speed):
@@ -82,10 +106,8 @@ async def _generate_audio_stream(text, voice, speed):
         print(f"Error converting speed: {e}. Defaulting to +0%.")
         speed_rate = "+0%"
 
-    # Wrap text in SSML with correct language attribute to fix multilingual voice issues
-    # edge-tts has xml:lang='en-US' hardcoded, causing multilingual voices to misinterpret text
+    # Extract language from voice for debugging
     lang_code = extract_language_from_voice(edge_tts_voice)
-    ssml_text = wrap_text_with_language_ssml(text, edge_tts_voice)
 
     # DEBUG: Log the exact parameters being sent to edge-tts
     print(f"[TTS_DEBUG] Stream: Creating Communicate with: text='{text[:50]}...', voice='{edge_tts_voice}', lang='{lang_code}', rate='{speed_rate}'")
@@ -96,9 +118,9 @@ async def _generate_audio_stream(text, voice, speed):
         print(f"[DEBUG_STREAMING] _generate_audio_stream: Creating communicator - timestamp={comm_create_start}")
 
     # Force a fresh aiohttp connector to prevent connection pooling issues
-    # that can cause edge-tts to reuse connections with stale state
     connector = aiohttp.TCPConnector(force_close=True)
-    communicator = edge_tts.Communicate(text=ssml_text, voice=edge_tts_voice, rate=speed_rate, connector=connector)
+    # mkssml is patched at module level to use correct xml:lang from voice name
+    communicator = edge_tts.Communicate(text=text, voice=edge_tts_voice, rate=speed_rate, connector=connector)
 
     if DEBUG_STREAMING:
         comm_create_end = datetime.now()
@@ -249,22 +271,20 @@ async def _generate_audio(text, voice, response_format, speed):
         print(f"Error converting speed: {e}. Defaulting to +0%.")
         speed_rate = "+0%"
 
-    # Wrap text in SSML with correct language attribute to fix multilingual voice issues
-    # edge-tts has xml:lang='en-US' hardcoded, causing multilingual voices to misinterpret text
+    # Extract language from voice for debugging
     lang_code = extract_language_from_voice(edge_tts_voice)
-    ssml_text = wrap_text_with_language_ssml(text, edge_tts_voice)
 
     # DEBUG: Log the exact parameters being sent to edge-tts
     print(f"[TTS_DEBUG] Creating Communicate with: text='{text[:50]}...', voice='{edge_tts_voice}', lang='{lang_code}', rate='{speed_rate}'")
 
     # Force a fresh aiohttp connector to prevent connection pooling issues
-    # that can cause edge-tts to reuse connections with stale state
     connector = aiohttp.TCPConnector(force_close=True)
-    
+
     # Generate the MP3 file
-    communicator = edge_tts.Communicate(text=ssml_text, voice=edge_tts_voice, rate=speed_rate, connector=connector)
+    # mkssml is patched at module level to use correct xml:lang from voice name
+    communicator = edge_tts.Communicate(text=text, voice=edge_tts_voice, rate=speed_rate, connector=connector)
     await communicator.save(temp_mp3_path)
-    
+
     print(f"[TTS_DEBUG] Saved audio to {temp_mp3_path}, size={os.path.getsize(temp_mp3_path)} bytes")
     temp_mp3_file_obj.close()  # Explicitly close our file object for the initial mp3
 
