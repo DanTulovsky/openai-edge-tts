@@ -16,6 +16,10 @@ DEFAULT_CONFIGS = {
     "DEFAULT_SPEED": 1.0,
     "DEFAULT_LANGUAGE": 'en-US',
 
+    # Text chunking settings
+    "TEXT_CHUNK_THRESHOLD": 1000,  # Characters before chunking kicks in
+    "ENABLE_TEXT_CHUNKING": True,  # Enable/disable text chunking feature
+
     # Feature flags
     "REQUIRE_API_KEY": True,
     "REMOVE_FILTER": False,

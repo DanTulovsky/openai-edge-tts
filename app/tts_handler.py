@@ -9,11 +9,16 @@ from pathlib import Path
 from datetime import datetime
 import aiohttp
 
-from utils import DETAILED_ERROR_LOGGING, DEBUG_STREAMING
+from utils import DETAILED_ERROR_LOGGING, DEBUG_STREAMING, getenv_bool
 from config import DEFAULT_CONFIGS
+from handle_text import chunk_text_intelligently
 
 # Language default (environment variable)
 DEFAULT_LANGUAGE = os.getenv('DEFAULT_LANGUAGE', DEFAULT_CONFIGS["DEFAULT_LANGUAGE"])
+
+# Text chunking settings
+TEXT_CHUNK_THRESHOLD = int(os.getenv('TEXT_CHUNK_THRESHOLD', str(DEFAULT_CONFIGS["TEXT_CHUNK_THRESHOLD"])))
+ENABLE_TEXT_CHUNKING = getenv_bool('ENABLE_TEXT_CHUNKING', DEFAULT_CONFIGS["ENABLE_TEXT_CHUNKING"])
 
 # OpenAI voice names mapped to edge-tts equivalents
 voice_mapping = {
@@ -129,82 +134,193 @@ async def _generate_audio_stream(text, voice, speed):
 
 
 def generate_speech_stream(text, voice, speed=1.0):
-    """Generate streaming speech audio (synchronous wrapper)."""
+    """Generate streaming speech audio (synchronous wrapper) with intelligent text chunking."""
     if DEBUG_STREAMING:
         start_time = datetime.now()
         print(f"[DEBUG_STREAMING] generate_speech_stream: Entry - text_length={len(text)}, timestamp={start_time}")
 
-    if DEBUG_STREAMING:
-        loop_create_start = datetime.now()
-        print(f"[DEBUG_STREAMING] generate_speech_stream: Creating event loop - timestamp={loop_create_start}")
+    # For short texts, use original logic (no chunking overhead)
+    should_chunk = ENABLE_TEXT_CHUNKING and len(text) > TEXT_CHUNK_THRESHOLD
 
-    # Create and set the event loop FIRST, before creating the async generator
-    loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(loop)
-
-    if DEBUG_STREAMING:
-        loop_create_end = datetime.now()
-        loop_create_delta = (loop_create_end - loop_create_start).total_seconds()
-        print(f"[DEBUG_STREAMING] generate_speech_stream: Event loop created and set - took={loop_create_delta:.3f}s, timestamp={loop_create_end}")
-
-    # Now create the async generator WITHIN the proper event loop context
-    async_generator = _generate_audio_stream(text, voice, speed)
-
-    try:
-        chunk_count = 0
-        last_chunk_time = None
-
-        while True:
-            try:
-                if DEBUG_STREAMING:
-                    retrieve_start = datetime.now()
-                    if chunk_count == 0:
-                        print(f"[DEBUG_STREAMING] generate_speech_stream: Retrieving first chunk from async generator - timestamp={retrieve_start}")
-                    else:
-                        if last_chunk_time:
-                            retrieve_delta = (retrieve_start - last_chunk_time).total_seconds()
-                            print(f"[DEBUG_STREAMING] generate_speech_stream: Retrieving chunk {chunk_count + 1} from async generator - timestamp={retrieve_start}, delta_from_last_yield={retrieve_delta:.3f}s")
-
-                next_chunk = loop.run_until_complete(async_generator.__anext__())
-
-                if DEBUG_STREAMING:
-                    retrieve_end = datetime.now()
-                    retrieve_delta = (retrieve_end - retrieve_start).total_seconds()
-                    chunk_size = len(next_chunk)
-                    print(f"[DEBUG_STREAMING] generate_speech_stream: Retrieved chunk - chunk_num={chunk_count + 1}, size={chunk_size} bytes, retrieval_took={retrieve_delta:.3f}s, timestamp={retrieve_end}")
-            except StopAsyncIteration:
-                break
-
-            chunk_count += 1
-
-            if DEBUG_STREAMING:
-                yield_time = datetime.now()
-                if last_chunk_time:
-                    yield_delta = (yield_time - last_chunk_time).total_seconds()
-                    print(f"[DEBUG_STREAMING] generate_speech_stream: Yielding chunk - chunk_num={chunk_count}, size={len(next_chunk)} bytes, timestamp={yield_time}, delta_from_last_yield={yield_delta:.3f}s")
-                else:
-                    print(f"[DEBUG_STREAMING] generate_speech_stream: Yielding chunk - chunk_num={chunk_count}, size={len(next_chunk)} bytes, timestamp={yield_time}")
-
-            yield next_chunk
-            last_chunk_time = datetime.now() if DEBUG_STREAMING else None
-    finally:
-        # Best-effort cleanup of async generators and loop
+    if not should_chunk:
+        # Use original simple logic for non-chunked texts (exactly as it was before)
         if DEBUG_STREAMING:
-            cleanup_start = datetime.now()
-            print(f"[DEBUG_STREAMING] generate_speech_stream: Starting cleanup - timestamp={cleanup_start}")
+            loop_create_start = datetime.now()
+            print(f"[DEBUG_STREAMING] generate_speech_stream: Creating event loop - timestamp={loop_create_start}")
+
+        # Create and set the event loop FIRST, before creating the async generator
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+
+        if DEBUG_STREAMING:
+            loop_create_end = datetime.now()
+            loop_create_delta = (loop_create_end - loop_create_start).total_seconds()
+            print(f"[DEBUG_STREAMING] generate_speech_stream: Event loop created and set - took={loop_create_delta:.3f}s, timestamp={loop_create_end}")
+
+        # Now create the async generator WITHIN the proper event loop context
+        async_generator = _generate_audio_stream(text, voice, speed)
 
         try:
-            loop.run_until_complete(loop.shutdown_asyncgens())
-        except Exception:
-            pass
-        asyncio.set_event_loop(None)
-        loop.close()
+            chunk_count = 0
+            last_chunk_time = None
+
+            while True:
+                try:
+                    if DEBUG_STREAMING:
+                        retrieve_start = datetime.now()
+                        if chunk_count == 0:
+                            print(f"[DEBUG_STREAMING] generate_speech_stream: Retrieving first chunk from async generator - timestamp={retrieve_start}")
+                        else:
+                            if last_chunk_time:
+                                retrieve_delta = (retrieve_start - last_chunk_time).total_seconds()
+                                print(f"[DEBUG_STREAMING] generate_speech_stream: Retrieving chunk {chunk_count + 1} from async generator - timestamp={retrieve_start}, delta_from_last_yield={retrieve_delta:.3f}s")
+
+                    next_chunk = loop.run_until_complete(async_generator.__anext__())
+
+                    if DEBUG_STREAMING:
+                        retrieve_end = datetime.now()
+                        retrieve_delta = (retrieve_end - retrieve_start).total_seconds()
+                        chunk_size = len(next_chunk)
+                        print(f"[DEBUG_STREAMING] generate_speech_stream: Retrieved chunk - chunk_num={chunk_count + 1}, size={chunk_size} bytes, retrieval_took={retrieve_delta:.3f}s, timestamp={retrieve_end}")
+                except StopAsyncIteration:
+                    break
+
+                chunk_count += 1
+
+                if DEBUG_STREAMING:
+                    yield_time = datetime.now()
+                    if last_chunk_time:
+                        yield_delta = (yield_time - last_chunk_time).total_seconds()
+                        print(f"[DEBUG_STREAMING] generate_speech_stream: Yielding chunk - chunk_num={chunk_count}, size={len(next_chunk)} bytes, timestamp={yield_time}, delta_from_last_yield={yield_delta:.3f}s")
+                    else:
+                        print(f"[DEBUG_STREAMING] generate_speech_stream: Yielding chunk - chunk_num={chunk_count}, size={len(next_chunk)} bytes, timestamp={yield_time}")
+
+                yield next_chunk
+                last_chunk_time = datetime.now() if DEBUG_STREAMING else None
+        finally:
+            # Best-effort cleanup of async generators and loop
+            if DEBUG_STREAMING:
+                cleanup_start = datetime.now()
+                print(f"[DEBUG_STREAMING] generate_speech_stream: Starting cleanup - timestamp={cleanup_start}")
+
+            try:
+                loop.run_until_complete(loop.shutdown_asyncgens())
+            except Exception:
+                pass
+            asyncio.set_event_loop(None)
+            loop.close()
+
+            if DEBUG_STREAMING:
+                cleanup_end = datetime.now()
+                cleanup_delta = (cleanup_end - cleanup_start).total_seconds()
+                total_delta = (cleanup_end - start_time).total_seconds()
+                print(f"[DEBUG_STREAMING] generate_speech_stream: Cleanup completed - cleanup_took={cleanup_delta:.3f}s, total_time={total_delta:.3f}s, total_chunks={chunk_count}, timestamp={cleanup_end}")
+        return
+
+    # Large texts - chunk and process sequentially
+    text_chunks = chunk_text_intelligently(text, TEXT_CHUNK_THRESHOLD)
+    # Filter out empty/whitespace chunks
+    text_chunks = [chunk for chunk in text_chunks if chunk and chunk.strip()]
+
+    if DEBUG_STREAMING:
+        print(f"[DEBUG_STREAMING] generate_speech_stream: Text chunked into {len(text_chunks)} chunks - chunk_sizes={[len(c) for c in text_chunks]}")
+
+    # If all chunks were filtered out, return early
+    if not text_chunks:
+        if DEBUG_STREAMING:
+            print(f"[DEBUG_STREAMING] generate_speech_stream: All chunks filtered out, returning early")
+        return
+
+    # Process each text chunk sequentially
+    total_audio_chunks = 0
+    for text_chunk_idx, text_chunk in enumerate(text_chunks):
+        # Skip empty or whitespace-only chunks
+        if not text_chunk or not text_chunk.strip():
+            if DEBUG_STREAMING:
+                print(f"[DEBUG_STREAMING] generate_speech_stream: Skipping empty/whitespace chunk {text_chunk_idx + 1}/{len(text_chunks)}")
+            continue
 
         if DEBUG_STREAMING:
-            cleanup_end = datetime.now()
-            cleanup_delta = (cleanup_end - cleanup_start).total_seconds()
-            total_delta = (cleanup_end - start_time).total_seconds()
-            print(f"[DEBUG_STREAMING] generate_speech_stream: Cleanup completed - cleanup_took={cleanup_delta:.3f}s, total_time={total_delta:.3f}s, total_chunks={chunk_count}, timestamp={cleanup_end}")
+            chunk_start_time = datetime.now()
+            print(f"[DEBUG_STREAMING] generate_speech_stream: Processing text chunk {text_chunk_idx + 1}/{len(text_chunks)} - length={len(text_chunk)}, timestamp={chunk_start_time}")
+
+        if DEBUG_STREAMING:
+            loop_create_start = datetime.now()
+            print(f"[DEBUG_STREAMING] generate_speech_stream: Creating event loop for chunk {text_chunk_idx + 1} - timestamp={loop_create_start}")
+
+        # Create and set the event loop for this chunk
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+
+        if DEBUG_STREAMING:
+            loop_create_end = datetime.now()
+            loop_create_delta = (loop_create_end - loop_create_start).total_seconds()
+            print(f"[DEBUG_STREAMING] generate_speech_stream: Event loop created and set - took={loop_create_delta:.3f}s, timestamp={loop_create_end}")
+
+        # Create the async generator for this text chunk
+        async_generator = _generate_audio_stream(text_chunk, voice, speed)
+
+        try:
+            chunk_count = 0
+            last_chunk_time = None
+
+            while True:
+                try:
+                    if DEBUG_STREAMING:
+                        retrieve_start = datetime.now()
+                        if chunk_count == 0:
+                            print(f"[DEBUG_STREAMING] generate_speech_stream: Retrieving first audio chunk from text chunk {text_chunk_idx + 1} - timestamp={retrieve_start}")
+                        else:
+                            if last_chunk_time:
+                                retrieve_delta = (retrieve_start - last_chunk_time).total_seconds()
+                                print(f"[DEBUG_STREAMING] generate_speech_stream: Retrieving audio chunk {chunk_count + 1} from text chunk {text_chunk_idx + 1} - timestamp={retrieve_start}, delta_from_last_yield={retrieve_delta:.3f}s")
+
+                    next_chunk = loop.run_until_complete(async_generator.__anext__())
+
+                    if DEBUG_STREAMING:
+                        retrieve_end = datetime.now()
+                        retrieve_delta = (retrieve_end - retrieve_start).total_seconds()
+                        chunk_size = len(next_chunk)
+                        print(f"[DEBUG_STREAMING] generate_speech_stream: Retrieved audio chunk - text_chunk={text_chunk_idx + 1}, audio_chunk={chunk_count + 1}, size={chunk_size} bytes, retrieval_took={retrieve_delta:.3f}s, timestamp={retrieve_end}")
+                except StopAsyncIteration:
+                    break
+
+                chunk_count += 1
+                total_audio_chunks += 1
+
+                if DEBUG_STREAMING:
+                    yield_time = datetime.now()
+                    if last_chunk_time:
+                        yield_delta = (yield_time - last_chunk_time).total_seconds()
+                        print(f"[DEBUG_STREAMING] generate_speech_stream: Yielding audio chunk - text_chunk={text_chunk_idx + 1}, audio_chunk={chunk_count}, size={len(next_chunk)} bytes, timestamp={yield_time}, delta_from_last_yield={yield_delta:.3f}s")
+                    else:
+                        print(f"[DEBUG_STREAMING] generate_speech_stream: Yielding audio chunk - text_chunk={text_chunk_idx + 1}, audio_chunk={chunk_count}, size={len(next_chunk)} bytes, timestamp={yield_time}")
+
+                yield next_chunk
+                last_chunk_time = datetime.now() if DEBUG_STREAMING else None
+        finally:
+            # Best-effort cleanup of async generators and loop for this chunk
+            if DEBUG_STREAMING:
+                cleanup_start = datetime.now()
+                print(f"[DEBUG_STREAMING] generate_speech_stream: Starting cleanup for text chunk {text_chunk_idx + 1} - timestamp={cleanup_start}")
+
+            try:
+                loop.run_until_complete(loop.shutdown_asyncgens())
+            except Exception:
+                pass
+            asyncio.set_event_loop(None)
+            loop.close()
+
+            if DEBUG_STREAMING:
+                cleanup_end = datetime.now()
+                cleanup_delta = (cleanup_end - cleanup_start).total_seconds()
+                chunk_total_delta = (cleanup_end - chunk_start_time).total_seconds()
+                print(f"[DEBUG_STREAMING] generate_speech_stream: Cleanup completed for text chunk {text_chunk_idx + 1} - cleanup_took={cleanup_delta:.3f}s, chunk_time={chunk_total_delta:.3f}s, audio_chunks={chunk_count}, timestamp={cleanup_end}")
+
+    if DEBUG_STREAMING:
+        end_time = datetime.now()
+        total_delta = (end_time - start_time).total_seconds()
+        print(f"[DEBUG_STREAMING] generate_speech_stream: All chunks completed - text_chunks={len(text_chunks)}, total_audio_chunks={total_audio_chunks}, total_time={total_delta:.3f}s, timestamp={end_time}")
 
 
 async def _generate_audio(text, voice, response_format, speed):
@@ -302,19 +418,137 @@ async def _generate_audio(text, voice, response_format, speed):
 
 
 def generate_speech(text, voice, response_format, speed=1.0):
-    # Create a fresh event loop for each request to prevent cross-request state contamination
-    # This is especially important when running under gevent WSGI server
-    loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(loop)
-    try:
-        return loop.run_until_complete(_generate_audio(text, voice, response_format, speed))
-    finally:
+    """Generate speech audio with intelligent text chunking for large texts."""
+    # Validate input text
+    if not text or not text.strip():
+        raise ValueError("Text cannot be empty or whitespace-only")
+
+    # Determine if we should chunk the text
+    should_chunk = ENABLE_TEXT_CHUNKING and len(text) > TEXT_CHUNK_THRESHOLD
+
+    if should_chunk:
+        text_chunks = chunk_text_intelligently(text, TEXT_CHUNK_THRESHOLD)
+        # Filter out empty/whitespace chunks
+        text_chunks = [chunk for chunk in text_chunks if chunk and chunk.strip()]
+        if DEBUG_STREAMING:
+            print(f"[DEBUG_STREAMING] generate_speech: Text chunked into {len(text_chunks)} chunks - chunk_sizes={[len(c) for c in text_chunks]}")
+    else:
+        text_chunks = [text]
+        if DEBUG_STREAMING and len(text) > 0:
+            print(f"[DEBUG_STREAMING] generate_speech: Text not chunked (length={len(text)}, threshold={TEXT_CHUNK_THRESHOLD}, enabled={ENABLE_TEXT_CHUNKING})")
+
+    # If all chunks were filtered out, raise an error
+    if not text_chunks:
+        raise ValueError("All text chunks were empty or whitespace-only after processing")
+
+    # If only one chunk, use the original logic
+    if len(text_chunks) == 1:
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
         try:
-            loop.run_until_complete(loop.shutdown_asyncgens())
-        except Exception:
-            pass
-        asyncio.set_event_loop(None)
-        loop.close()
+            return loop.run_until_complete(_generate_audio(text, voice, response_format, speed))
+        finally:
+            try:
+                loop.run_until_complete(loop.shutdown_asyncgens())
+            except Exception:
+                pass
+            asyncio.set_event_loop(None)
+            loop.close()
+
+    # Multiple chunks - generate audio for each and concatenate
+    chunk_files = []
+    try:
+        for idx, text_chunk in enumerate(text_chunks):
+            # Skip empty or whitespace-only chunks
+            if not text_chunk or not text_chunk.strip():
+                if DEBUG_STREAMING:
+                    print(f"[DEBUG_STREAMING] generate_speech: Skipping empty/whitespace chunk {idx + 1}/{len(text_chunks)}")
+                continue
+
+            if DEBUG_STREAMING:
+                print(f"[DEBUG_STREAMING] generate_speech: Generating audio for chunk {idx + 1}/{len(text_chunks)} - length={len(text_chunk)}")
+
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+            try:
+                chunk_file = loop.run_until_complete(_generate_audio(text_chunk, voice, response_format, speed))
+                chunk_files.append(chunk_file)
+            finally:
+                try:
+                    loop.run_until_complete(loop.shutdown_asyncgens())
+                except Exception:
+                    pass
+                asyncio.set_event_loop(None)
+                loop.close()
+
+        # Concatenate all audio files using FFmpeg
+        if DEBUG_STREAMING:
+            print(f"[DEBUG_STREAMING] generate_speech: Concatenating {len(chunk_files)} audio files")
+
+        # Check if FFmpeg is installed
+        if not is_ffmpeg_installed():
+            print("FFmpeg is not available. Returning first chunk only.")
+            # Return the first chunk and clean up the rest
+            first_chunk = chunk_files[0]
+            for chunk_file in chunk_files[1:]:
+                Path(chunk_file).unlink(missing_ok=True)
+            return first_chunk
+
+        # Create a temporary file for the concatenated output
+        output_file_obj = tempfile.NamedTemporaryFile(delete=False, suffix=f".{response_format}")
+        output_path = output_file_obj.name
+        output_file_obj.close()
+
+        # Create a file list for FFmpeg concat demuxer
+        concat_list_obj = tempfile.NamedTemporaryFile(mode='w', delete=False, suffix='.txt')
+        concat_list_path = concat_list_obj.name
+        for chunk_file in chunk_files:
+            # FFmpeg concat demuxer requires absolute paths and proper escaping
+            concat_list_obj.write(f"file '{os.path.abspath(chunk_file)}'\n")
+        concat_list_obj.close()
+
+        try:
+            # Use FFmpeg concat demuxer to concatenate audio files
+            ffmpeg_command = [
+                "ffmpeg",
+                "-f", "concat",
+                "-safe", "0",
+                "-i", concat_list_path,
+                "-c", "copy",  # Copy codec without re-encoding for speed
+                "-y",  # Overwrite without prompt
+                output_path
+            ]
+
+            subprocess.run(ffmpeg_command, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+
+            if DEBUG_STREAMING:
+                print(f"[DEBUG_STREAMING] generate_speech: Concatenation complete - output_size={os.path.getsize(output_path)} bytes")
+
+            return output_path
+        except subprocess.CalledProcessError as e:
+            # Clean up output file if concatenation failed
+            Path(output_path).unlink(missing_ok=True)
+
+            if DETAILED_ERROR_LOGGING:
+                error_message = f"FFmpeg error during audio concatenation. Command: '{' '.join(e.cmd)}'. Stderr: {e.stderr.decode('utf-8', 'ignore')}"
+                print(error_message)
+            else:
+                error_message = f"FFmpeg error during audio concatenation: {e}"
+                print(error_message)
+
+            # Fall back to returning the first chunk
+            print("Falling back to first chunk only due to concatenation error")
+            first_chunk = chunk_files[0]
+            for chunk_file in chunk_files[1:]:
+                Path(chunk_file).unlink(missing_ok=True)
+            return first_chunk
+        finally:
+            # Clean up concat list file
+            Path(concat_list_path).unlink(missing_ok=True)
+    finally:
+        # Clean up all chunk files (they've been concatenated or we're done with them)
+        for chunk_file in chunk_files:
+            Path(chunk_file).unlink(missing_ok=True)
 
 
 def get_models():
