@@ -112,8 +112,8 @@ if [ "${NO_VERSION:-false}" != "true" ]; then
     fi
 
     # Format with leading zeros (two digits each)
-    FORMATTED_BUILD=$(printf "%02d" $NEW_BUILD)
-    FORMATTED_PATCH=$(printf "%02d" $NEW_PATCH)
+    FORMATTED_BUILD=$(printf "%02d" "$((10#$NEW_BUILD))")
+    FORMATTED_PATCH=$(printf "%02d" "$((10#$NEW_PATCH))")
 
     # Create version tag: YYYYMMDD.BUILD.PATCH
     VERSION_TAG="${TODAY}.${FORMATTED_BUILD}.${FORMATTED_PATCH}"
