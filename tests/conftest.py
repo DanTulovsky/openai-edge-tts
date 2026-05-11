@@ -1,5 +1,7 @@
 import sys
 import difflib
+import pytest
+
 import _test_helpers as helpers
 
 try:
@@ -10,6 +12,11 @@ except Exception:
     Console = None
     Table = None
     Text = None
+
+
+def pytest_configure(config):
+    """Make marker warnings quiet when dependencies are missing."""
+    config.addinivalue_line("markers", "slow: long-running tests (e.g. whisper e2e)")
 
 
 def pytest_runtest_makereport(item, call):
@@ -53,5 +60,3 @@ def pytest_runtest_makereport(item, call):
                     except Exception:
                         print(line)
             helpers.clear_last_diff()
-
-

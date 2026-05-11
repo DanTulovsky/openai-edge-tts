@@ -93,7 +93,7 @@ def test_voice_with_logging(word="doppie", num_requests=10):
         print(f"\n{'='*70}")
         print("NEXT STEPS:")
         print("{'='*70}")
-        print("1. Check server logs for [TTS_DEBUG] messages")
+        print("1. Run the server with DEBUG_STREAMING=true for verbose TTS pipeline logs")
         print("2. Verify edge-tts is receiving the correct voice parameter")
         print("3. Check if different variants have different file sizes")
         print("4. Try listening to the audio files to confirm language difference")

@@ -1,16 +1,18 @@
 # server.py
-# Configure OpenTelemetry trace context propagation BEFORE auto-instrumentation
-# This ensures incoming trace context headers (traceparent, tracestate) are properly
-# extracted and linked, creating proper parent-child span relationships
-from opentelemetry.propagate import set_global_textmap
-from opentelemetry.trace.propagation.tracecontext import TraceContextTextMapPropagator
+import os
 
-# Set up W3C Trace Context propagator (standard) - must be done before initialize()
-set_global_textmap(TraceContextTextMapPropagator())
+# Tests spawn this process with OPENAI_EDGE_TTS_TEST_MODE=1. Skip OpenTelemetry auto-instrumentation
+# at import time — it pulls a large dependency graph and can stall startup for minutes (bad for pytest).
+if os.environ.get("OPENAI_EDGE_TTS_TEST_MODE") != "1":
+    # Configure trace context propagation BEFORE auto-instrumentation (production / normal runs).
+    from opentelemetry.propagate import set_global_textmap
+    from opentelemetry.trace.propagation.tracecontext import TraceContextTextMapPropagator
 
-from opentelemetry.instrumentation.auto_instrumentation import initialize
-# Now initialize auto-instrumentation with the propagator configured
-initialize()
+    set_global_textmap(TraceContextTextMapPropagator())
+
+    from opentelemetry.instrumentation.auto_instrumentation import initialize
+
+    initialize()
 
 import uuid
 from utils import getenv_bool, require_api_key, AUDIO_FORMAT_MIME_TYPES, DETAILED_ERROR_LOGGING, DEBUG_STREAMING
@@ -25,7 +27,6 @@ import re
 import base64
 import json
 import traceback
-import os
 from dotenv import load_dotenv
 from gevent.pywsgi import WSGIServer
 from flask import Flask, request, send_file, jsonify, Response, make_response, render_template
@@ -275,21 +276,9 @@ def stream_speech(stream_id):
     response_format = params.get('response_format', DEFAULT_RESPONSE_FORMAT)
     mime_type = AUDIO_FORMAT_MIME_TYPES.get(response_format, "audio/mpeg")
 
-    # Special-case iOS Safari metadata probe (Icy-Metadata header).
-    # Safari issues a separate GET with `Icy-Metadata: 1` to probe the stream.
-    # Respond with 200 and an ICY header without consuming/deleting the stream.
-    if request.headers.get('Icy-Metadata') is not None:
-        return Response(
-            '',
-            status=200,
-            headers={
-                'Content-Type': mime_type,
-                'Cache-Control': 'no-cache',
-                'Accept-Ranges': 'bytes',
-                'Icy-MetaInt': '0',
-                'Access-Control-Allow-Origin': request.headers.get('Origin', '*')
-            }
-        )
+    # AppleCoreMedia (iOS AVPlayer) may send `Icy-Metadata: 1` on a follow-up GET.
+    # Do NOT answer with an empty body: AVPlayer treats that as the real stream and
+    # never plays audio. Fall through to the same progressive stream as a normal GET.
 
     # Handle Range requests (Safari probes with Range: bytes=0-1)
     range_header = request.headers.get('Range')

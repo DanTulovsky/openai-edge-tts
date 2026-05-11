@@ -2,19 +2,31 @@ version: "3"
 
 tasks:
   test:
-    desc: Run all tests
+    desc: Run the full test suite under tests/
     cmds:
-      - pytest tests/ -v --tb=short
+      # PYTHONUNBUFFERED: unbuffer child server processes spawned by tests.
+      # --no-cov: global pytest-cov can interact badly with traced code; use task test:coverage when needed.
+      - PYTHONUNBUFFERED=1 pytest tests/ -v --tb=short --durations=10 --no-cov
+
+  test:all:
+    desc: Same as task test (full suite)
+    cmds:
+      - task: test
 
   test:italian:
-    desc: Run only Italian voice consistency tests
+    desc: Run Italian voice consistency tests (hits Edge; may flake if service varies audio)
     cmds:
-      - pytest tests/test_italian_voice_consistency.py -v
+      - PYTHONUNBUFFERED=1 pytest tests/test_italian_voice_consistency.py -v --durations=10 --no-cov
 
   test:e2e:
-    desc: Run end-to-end TTS tests
+    desc: Run all tests in test_e2e_tts.py (includes slow whisper cases)
     cmds:
-      - pytest tests/test_e2e_tts.py -v
+      - PYTHONUNBUFFERED=1 pytest tests/test_e2e_tts.py -v --durations=10 --no-cov
+
+  test:e2e:fast:
+    desc: E2e HTTP probes only (no slow whisper tests)
+    cmds:
+      - PYTHONUNBUFFERED=1 pytest tests/test_e2e_tts.py -v --durations=10 --no-cov -m "not slow"
 
   test:watch:
     desc: Run tests in watch mode (requires pytest-watch)
@@ -24,7 +36,7 @@ tasks:
   test:coverage:
     desc: Run tests with coverage report
     cmds:
-      - pytest tests/ -v --cov=app --cov-report=html --cov-report=term
+      - PYTHONUNBUFFERED=1 pytest tests/ -v --cov=app --cov-report=html --cov-report=term --durations=10
 
   install:
     desc: Install dependencies

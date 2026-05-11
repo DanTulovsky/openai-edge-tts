@@ -2,6 +2,8 @@
 
 import edge_tts
 import asyncio
+import html
+import re
 import tempfile
 import subprocess
 import os
@@ -51,6 +53,31 @@ def is_ffmpeg_installed():
         return False
 
 
+def prepare_edge_tts_input(edge_tts_voice: str, text: str) -> str:
+    """Multilingual neural voices auto-detect language, which caused alternating EN/IT audio (WET-163).
+
+    When the voice short name is locale-prefixed (e.g. it-IT-*Multilingual*), wrap plain text in SSML
+    with ``xml:lang`` so Edge uses a fixed language. Caller SSML (``<speak``) is left unchanged.
+    """
+    if not text or not text.strip():
+        return text
+    stripped = text.lstrip()
+    if stripped.startswith("<speak"):
+        return text
+    if "Multilingual" not in edge_tts_voice:
+        return text
+    m = re.match(r"^([a-z]{2})-([A-Z]{2})-", edge_tts_voice)
+    if not m:
+        return text
+    locale = f"{m.group(1)}-{m.group(2)}"
+    inner = html.escape(text, quote=False)
+    vname = html.escape(edge_tts_voice, quote=True)
+    return (
+        '<speak version="1.0" xmlns="http://www.w3.org/2001/10/synthesis" '
+        f'xml:lang="{locale}"><voice name="{vname}">{inner}</voice></speak>'
+    )
+
+
 async def _generate_audio_stream(text, voice, speed):
     """Generate streaming TTS audio using edge-tts."""
     if DEBUG_STREAMING:
@@ -59,6 +86,7 @@ async def _generate_audio_stream(text, voice, speed):
 
     # Determine if the voice is an OpenAI-compatible voice or a direct edge-tts voice
     edge_tts_voice = voice_mapping.get(voice, voice)  # Use mapping if in OpenAI names, otherwise use as-is
+    text = prepare_edge_tts_input(edge_tts_voice, text)
 
     # Convert speed to SSML rate format
     try:
@@ -66,9 +94,6 @@ async def _generate_audio_stream(text, voice, speed):
     except Exception as e:
         print(f"Error converting speed: {e}. Defaulting to +0%.")
         speed_rate = "+0%"
-
-    # DEBUG: Log the exact parameters being sent to edge-tts
-    print(f"[TTS_DEBUG] Stream: Creating Communicate with: text='{text[:50]}...', voice='{edge_tts_voice}', rate='{speed_rate}'")
 
     # Create the communicator for streaming
     if DEBUG_STREAMING:
@@ -327,6 +352,7 @@ async def _generate_audio(text, voice, response_format, speed):
     """Generate TTS audio and optionally convert to a different format."""
     # Determine if the voice is an OpenAI-compatible voice or a direct edge-tts voice
     edge_tts_voice = voice_mapping.get(voice, voice)  # Use mapping if in OpenAI names, otherwise use as-is
+    text = prepare_edge_tts_input(edge_tts_voice, text)
 
     # Generate the TTS output in mp3 format first
     temp_mp3_file_obj = tempfile.NamedTemporaryFile(delete=False, suffix=".mp3")
@@ -339,9 +365,6 @@ async def _generate_audio(text, voice, response_format, speed):
         print(f"Error converting speed: {e}. Defaulting to +0%.")
         speed_rate = "+0%"
 
-    # DEBUG: Log the exact parameters being sent to edge-tts
-    print(f"[TTS_DEBUG] Creating Communicate with: text='{text[:50]}...', voice='{edge_tts_voice}', rate='{speed_rate}'")
-
     # Force a fresh aiohttp connector to prevent connection pooling issues
     connector = aiohttp.TCPConnector(force_close=True)
 
@@ -349,7 +372,6 @@ async def _generate_audio(text, voice, response_format, speed):
     communicator = edge_tts.Communicate(text=text, voice=edge_tts_voice, rate=speed_rate, connector=connector)
     await communicator.save(temp_mp3_path)
 
-    print(f"[TTS_DEBUG] Saved audio to {temp_mp3_path}, size={os.path.getsize(temp_mp3_path)} bytes")
     temp_mp3_file_obj.close()  # Explicitly close our file object for the initial mp3
 
     # If the requested format is mp3, return the generated file directly

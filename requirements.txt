@@ -3,3 +3,6 @@ gevent
 python-dotenv
 edge-tts==7.2.3
 emoji
+# Match Dockerfile: server.py imports OpenTelemetry before Flask starts
+opentelemetry-distro
+opentelemetry-exporter-otlp
