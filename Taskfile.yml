@@ -54,6 +54,7 @@ tasks:
   build-push:
     desc: Build and push Docker image
     cmds:
+      # If pip fails with SSL to PyPI (corporate TLS inspection): PIP_USE_TRUSTED_PYPI=true task build-push
       - ./build-multi-platform.sh --ffmpeg --push
 
   run:

@@ -17,6 +17,14 @@ NO_CACHE=false
 VERSION_FILE=".version"
 # Note: FFmpeg is now always included via multi-stage build in Dockerfile
 
+# Optional (corporate HTTPS inspection hitting PyPI):
+#   export PIP_USE_TRUSTED_PYPI=true
+# then run this script — disables SSL hostname verify for PyPI hosts only inside the image build.
+DOCKER_PIP_ARGS=""
+if [ "${PIP_USE_TRUSTED_PYPI:-}" = "true" ] || [ "${PIP_USE_TRUSTED_PYPI:-}" = "1" ]; then
+  DOCKER_PIP_ARGS="--build-arg PIP_USE_TRUSTED_PYPI=true"
+fi
+
 # Parse command line arguments
 while [[ $# -gt 0 ]]; do
   case $1 in
@@ -57,6 +65,9 @@ while [[ $# -gt 0 ]]; do
       echo "  --ffmpeg        (deprecated: FFmpeg is always included)"
       echo "  --no-cache      Build without using cache"
       echo "  --help          Show this help message"
+      echo ""
+      echo "Environment:"
+      echo "  PIP_USE_TRUSTED_PYPI=true   If pip fails with SSL cert errors to PyPI (TLS inspection)."
       echo ""
       echo "Examples:"
       echo "  $0                                    # Build local only"
@@ -157,6 +168,7 @@ if ! docker buildx version > /dev/null 2>&1; then
     fi
     docker build -t "${IMAGE_NAME}:${TAG}" \
                  ${VERSION_ARG} \
+                 ${DOCKER_PIP_ARGS} \
                  .
     exit 0
 fi
@@ -179,6 +191,7 @@ if [ -n "$VERSION_TAG" ]; then
 else
     BUILD_ARGS="${BUILD_ARGS} --build-arg VERSION=${TAG:-dev}"
 fi
+BUILD_ARGS="${BUILD_ARGS} ${DOCKER_PIP_ARGS}"
 BUILD_ARGS="${BUILD_ARGS} ${TAGS_TO_BUILD}"
 
 # Multi-platform builds require --push; cannot use --load
@@ -211,6 +224,7 @@ if [ "$PUSH" = false ]; then
 
     ${BUILD_CMD} ${TAG_CMDS} \
                  ${VERSION_ARG} \
+                 ${DOCKER_PIP_ARGS} \
                  .
 
     echo -e "${GREEN}✓ Build complete!${NC}"
